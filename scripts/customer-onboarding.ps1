@@ -405,19 +405,39 @@ try {
     exit 1
 }
 
+# Step 6: Apply infrastructure
+Write-Host "`n🚀 Step 6: Applying infrastructure..." -ForegroundColor Yellow
+
+try {
+    terraform apply -auto-approve "$CustomerName.tfplan"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Terraform apply failed"
+    }
+    Write-Host "✅ Infrastructure deployed successfully" -ForegroundColor Green
+} catch {
+    Write-Error "❌ Failed to apply Terraform plan: $_"
+    Pop-Location
+    exit 1
+}
+
 Pop-Location
 
-# Step 6: Summary and next steps
-Write-Host "`n🎉 Customer onboarding preparation completed!" -ForegroundColor Green
+# Step 7: Deployment completed
+Write-Host "`n🎉 Customer infrastructure deployment completed!" -ForegroundColor Green
 Write-Host "📁 Customer directory: $CustomerDir" -ForegroundColor Cyan
-Write-Host "📋 Terraform plan: $CustomerName.tfplan" -ForegroundColor Cyan
+Write-Host "🏗️ Infrastructure: Deployed and ready" -ForegroundColor Cyan
+
+Write-Host "`n📝 What was created:" -ForegroundColor Yellow
+Write-Host "✅ VPC with public/private subnets" -ForegroundColor White
+Write-Host "✅ EKS cluster: $CustomerName-eks-cluster" -ForegroundColor White
+Write-Host "✅ RDS databases for LiteLLM and Lago" -ForegroundColor White
+Write-Host "✅ S3 buckets for document storage" -ForegroundColor White
+Write-Host "✅ IAM roles and security groups" -ForegroundColor White
 
 Write-Host "`n📝 Next steps:" -ForegroundColor Yellow
-Write-Host "1. Review the Terraform plan in: $CustomerDir" -ForegroundColor White
-Write-Host "2. Apply the infrastructure:" -ForegroundColor White
-Write-Host "   cd `"$CustomerDir`"" -ForegroundColor Gray
-Write-Host "   terraform apply `"$CustomerName.tfplan`"" -ForegroundColor Gray
-Write-Host "3. Deploy applications using Helm charts" -ForegroundColor White
+Write-Host "1. Deploy applications using Helm charts" -ForegroundColor White
+Write-Host "2. Configure Open WebUI and Ollama" -ForegroundColor White
+Write-Host "3. Set up customer access and training" -ForegroundColor White
 
 if ($CreateSubaccount) {
     Write-Host "`n⚠️ Note: AWS subaccount creation was requested but not implemented in this script." -ForegroundColor Yellow
