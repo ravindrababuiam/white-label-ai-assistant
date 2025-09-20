@@ -171,22 +171,49 @@ jobs:
         run: |
           echo "🔍 Validating infrastructure deployment..."
           
+          # First, let's see what EKS clusters actually exist
+          echo "🔍 Checking all EKS clusters in region ${{ inputs.aws_region }}..."
+          aws eks list-clusters --region ${{ inputs.aws_region }} --output table || echo "Failed to list clusters"
+          
+          # Check if our specific cluster exists
+          EXPECTED_CLUSTER_NAME="${{ inputs.customer_name }}-eks-cluster"
+          echo "🎯 Looking for cluster: $EXPECTED_CLUSTER_NAME"
+          
           # Wait for EKS cluster to become active (up to 15 minutes)
           echo "⏳ Waiting for EKS cluster to become active..."
           for i in {1..30}; do
-            CLUSTER_STATUS=$(aws eks describe-cluster --region ${{ inputs.aws_region }} --name ${{ inputs.customer_name }}-eks-cluster --query 'cluster.status' --output text 2>/dev/null || echo "NOT_FOUND")
+            CLUSTER_STATUS=$(aws eks describe-cluster --region ${{ inputs.aws_region }} --name $EXPECTED_CLUSTER_NAME --query 'cluster.status' --output text 2>/dev/null || echo "NOT_FOUND")
             echo "EKS Cluster Status (attempt $i/30): $CLUSTER_STATUS"
             
             if [[ "$CLUSTER_STATUS" == "ACTIVE" ]]; then
               echo "✅ EKS cluster is active"
               break
             elif [[ "$CLUSTER_STATUS" == "NOT_FOUND" ]]; then
-              echo "❌ EKS cluster not found"
-              exit 1
+              if [[ $i -eq 1 ]]; then
+                echo "❌ EKS cluster not found on first attempt"
+                echo "🔍 This might indicate the Terraform deployment didn't create the cluster"
+                echo "📋 Let's check what resources were actually created..."
+                
+                # List all EKS clusters to see if there's a naming issue
+                echo "📋 All EKS clusters in region:"
+                aws eks list-clusters --region ${{ inputs.aws_region }} || echo "No clusters found or error listing clusters"
+                
+                # Check if this is just a timing issue - wait a bit more
+                echo "⏳ Waiting 2 minutes for cluster creation to complete..."
+                sleep 120
+                continue
+              else
+                echo "❌ EKS cluster still not found after waiting"
+                exit 1
+              fi
+            elif [[ "$CLUSTER_STATUS" == "CREATING" ]]; then
+              echo "🔄 EKS cluster is still being created..."
             fi
             
             if [[ $i -eq 30 ]]; then
               echo "❌ EKS cluster did not become active within 15 minutes"
+              echo "📋 Final cluster list:"
+              aws eks list-clusters --region ${{ inputs.aws_region }} || echo "Failed to list clusters"
               exit 1
             fi
             
