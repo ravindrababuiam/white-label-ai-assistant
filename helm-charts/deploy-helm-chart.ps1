@@ -61,11 +61,26 @@ try {
     exit 1
 }
 
+# Check if release already exists
+Write-Host "🔍 Checking if Helm release exists..." -ForegroundColor Cyan
+$releaseExists = $false
+try {
+    $existingRelease = helm list -n $Namespace -q | Where-Object { $_ -eq $CustomerName }
+    if ($existingRelease) {
+        $releaseExists = $true
+        Write-Host "⚠️ Helm release '$CustomerName' already exists, will upgrade" -ForegroundColor Yellow
+    } else {
+        Write-Host "✅ No existing release found, will install" -ForegroundColor Green
+    }
+} catch {
+    Write-Host "✅ No existing release found, will install" -ForegroundColor Green
+}
+
 # Build Helm command
 $helmCommand = @("helm")
 
-if ($Upgrade) {
-    $helmCommand += "upgrade"
+if ($Upgrade -or $releaseExists) {
+    $helmCommand += @("upgrade", "--install")
 } else {
     $helmCommand += "install"
 }
