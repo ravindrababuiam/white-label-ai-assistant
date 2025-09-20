@@ -6,8 +6,6 @@ metadata:
   namespace: {{ .Values.global.customerName }}-stack
   labels:
     {{- include "open-webui.labels" . | nindent 4 }}
-  annotations:
-    "helm.sh/resource-policy": keep
 spec:
   accessModes:
     - {{ .Values.openWebUI.persistence.accessMode }}
