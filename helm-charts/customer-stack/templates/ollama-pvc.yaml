@@ -6,6 +6,8 @@ metadata:
   namespace: {{ .Values.global.customerName }}-stack
   labels:
     {{- include "ollama.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/resource-policy": keep
 spec:
   accessModes:
     - {{ .Values.ollama.persistence.accessMode }}

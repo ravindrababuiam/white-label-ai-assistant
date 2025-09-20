@@ -188,7 +188,29 @@ try {
             Write-Host "Customer stack deployed successfully!" -ForegroundColor Green
         }
     } else {
-        Write-Error "Helm deployment failed with exit code: $LASTEXITCODE"
+        # Check if it's a PVC-related error and try to handle it
+        if ($result -match "persistentvolumeclaims.*not found") {
+            Write-Host "PVC not found error detected. Attempting to recreate PVCs..." -ForegroundColor Yellow
+            
+            # Delete the failed release and try a fresh install
+            helm uninstall $CustomerName -n $Namespace --ignore-not-found
+            
+            # Wait a moment for cleanup
+            Start-Sleep -Seconds 10
+            
+            # Retry with install instead of upgrade
+            $retryCommand = $helmCommand -replace "upgrade --install", "install"
+            Write-Host "Retrying with fresh install..." -ForegroundColor Yellow
+            $retryResult = & $retryCommand[0] $retryCommand[1..($retryCommand.Length-1)]
+            
+            if ($LASTEXITCODE -ne 0) {
+                Write-Error "Retry deployment also failed with exit code: $LASTEXITCODE"
+            } else {
+                Write-Host "Retry deployment successful!" -ForegroundColor Green
+            }
+        } else {
+            Write-Error "Helm deployment failed with exit code: $LASTEXITCODE"
+        }
     }
     
 } catch {
