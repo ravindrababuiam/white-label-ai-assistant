@@ -18,6 +18,10 @@ global:
     
   # Image pull policy
   imagePullPolicy: IfNotPresent
+
+# Namespace configuration
+namespace:
+  create: false  # Set to false to avoid conflicts with existing namespaces
   
   # Security context
   securityContext:
