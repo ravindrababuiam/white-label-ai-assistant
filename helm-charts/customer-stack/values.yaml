@@ -93,6 +93,8 @@ openWebUI:
       value: "false"
     - name: WEBUI_AUTH
       value: "true"
+    - name: DATA_DIR
+      value: "/app/backend/data"
       
   # AWS S3 integration for document storage
   s3:
