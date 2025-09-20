@@ -30,7 +30,7 @@ param(
     [switch]$Upgrade = $false,
     
     [Parameter(Mandatory=$false)]
-    [switch]$Debug = $false
+    [switch]$EnableDebug = $false
 )
 
 $ErrorActionPreference = "Stop"
@@ -174,14 +174,14 @@ if ($DryRun) {
     $helmCommand += "--dry-run"
 }
 
-if ($Debug) {
+if ($EnableDebug) {
     $helmCommand += "--debug"
 }
 
 $helmCommand += @("--wait", "--timeout", "10m")
 
 # Display command (for debugging)
-if ($Debug) {
+if ($EnableDebug) {
     Write-Host "🔧 Helm command:" -ForegroundColor Yellow
     Write-Host ($helmCommand -join " ") -ForegroundColor White
 }
