@@ -340,23 +340,23 @@ output "eks_cluster_security_group_id" {
 
 output "s3_bucket_name" {
   description = "Name of the S3 bucket for document storage"
-  value       = module.s3.bucket_name
+  value       = module.s3.customer_documents_bucket_name
 }
 
 output "s3_bucket_arn" {
   description = "ARN of the S3 bucket"
-  value       = module.s3.bucket_arn
+  value       = module.s3.customer_documents_bucket_arn
 }
 
 output "rds_endpoint" {
   description = "RDS instance endpoint"
-  value       = module.rds.db_instance_endpoint
+  value       = module.rds.litellm_db_endpoint
   sensitive   = true
 }
 
 output "rds_port" {
   description = "RDS instance port"
-  value       = module.rds.db_instance_port
+  value       = module.rds.litellm_db_port
 }
 
 output "customer_info" {
