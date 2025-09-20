@@ -105,7 +105,7 @@ openWebUI:
   # Persistent storage for user data
   persistence:
     enabled: true
-    storageClass: "gp3"
+    storageClass: "gp2"
     size: "10Gi"
     accessMode: ReadWriteOnce
     
@@ -194,7 +194,7 @@ ollama:
   # Persistent storage for models
   persistence:
     enabled: true
-    storageClass: "gp3"
+    storageClass: "gp2"
     size: "100Gi"
     accessMode: ReadWriteOnce
     mountPath: "/root/.ollama"
@@ -285,7 +285,7 @@ qdrant:
   # Persistent storage for vector data
   persistence:
     enabled: true
-    storageClass: "gp3"
+    storageClass: "gp2"
     size: "50Gi"
     accessMode: ReadWriteOnce
     mountPath: "/qdrant/storage"
