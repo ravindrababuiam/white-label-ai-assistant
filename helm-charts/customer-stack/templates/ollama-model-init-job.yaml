@@ -37,7 +37,7 @@ spec:
               echo "Ollama is ready, downloading models..."
               {{- range .Values.ollama.models.preload }}
               echo "Downloading model: {{ . }}"
-              curl -X POST http://ollama-service:11434/api/pull -d '{"name":"{{ . }"}' || echo "Failed to download {{ . }}"
+              curl -X POST http://ollama-service:11434/api/pull -d '{"name":"{{ . }}"}' || echo "Failed to download {{ . }}"
               {{- end }}
               
               echo "Model initialization completed"
