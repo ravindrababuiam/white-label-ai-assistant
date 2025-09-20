@@ -171,14 +171,28 @@ jobs:
         run: |
           echo "🔍 Validating infrastructure deployment..."
           
-          # Check EKS cluster
-          CLUSTER_STATUS=$(aws eks describe-cluster --region ${{ inputs.aws_region }} --name ${{ inputs.customer_name }}-eks-cluster --query 'cluster.status' --output text)
-          echo "EKS Cluster Status: $CLUSTER_STATUS"
-          
-          if [[ "$CLUSTER_STATUS" != "ACTIVE" ]]; then
-            echo "❌ EKS cluster is not active"
-            exit 1
-          fi
+          # Wait for EKS cluster to become active (up to 15 minutes)
+          echo "⏳ Waiting for EKS cluster to become active..."
+          for i in {1..30}; do
+            CLUSTER_STATUS=$(aws eks describe-cluster --region ${{ inputs.aws_region }} --name ${{ inputs.customer_name }}-eks-cluster --query 'cluster.status' --output text 2>/dev/null || echo "NOT_FOUND")
+            echo "EKS Cluster Status (attempt $i/30): $CLUSTER_STATUS"
+            
+            if [[ "$CLUSTER_STATUS" == "ACTIVE" ]]; then
+              echo "✅ EKS cluster is active"
+              break
+            elif [[ "$CLUSTER_STATUS" == "NOT_FOUND" ]]; then
+              echo "❌ EKS cluster not found"
+              exit 1
+            fi
+            
+            if [[ $i -eq 30 ]]; then
+              echo "❌ EKS cluster did not become active within 15 minutes"
+              exit 1
+            fi
+            
+            echo "⏳ Waiting 30 seconds before next check..."
+            sleep 30
+          done
           
           # Check RDS instances
           RDS_COUNT=$(aws rds describe-db-instances --region ${{ inputs.aws_region }} --query "length(DBInstances[?contains(DBInstanceIdentifier, '${{ inputs.customer_name }}') && DBInstanceStatus=='available'])")
