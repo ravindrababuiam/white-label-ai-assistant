@@ -97,7 +97,7 @@ terraform {
   }
   
   backend "s3" {
-    bucket = "white-label-ai-terraform-state"
+    bucket = "my-terra-bucket-001"
     key    = "customers/$CustomerName/terraform.tfstate"
     region = "$AwsRegion"
   }
