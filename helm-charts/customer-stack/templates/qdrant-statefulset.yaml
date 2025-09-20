@@ -1,0 +1,88 @@
+{{- if .Values.qdrant.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: qdrant
+  namespace: {{ .Values.global.customerName }}-stack
+  labels:
+    {{- include "qdrant.labels" . | nindent 4 }}
+spec:
+  serviceName: qdrant-service
+  replicas: {{ .Values.qdrant.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "qdrant.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "qdrant.selectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmaps.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "customer-stack.serviceAccountName" . }}
+      securityContext:
+        {{- include "customer-stack.securityContext" . | nindent 8 }}
+      containers:
+        - name: qdrant
+          image: "{{ .Values.qdrant.image.repository }}:{{ .Values.qdrant.image.tag }}"
+          imagePullPolicy: {{ .Values.qdrant.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.qdrant.service.ports.http }}
+              protocol: TCP
+            - name: grpc
+              containerPort: {{ .Values.qdrant.service.ports.grpc }}
+              protocol: TCP
+          env:
+            {{- include "customer-stack.awsEnvVars" . | nindent 12 }}
+            {{- range .Values.qdrant.env }}
+            - name: {{ .name }}
+              value: {{ .value | quote }}
+            {{- end }}
+          {{- if .Values.qdrant.livenessProbe }}
+          livenessProbe:
+            {{- toYaml .Values.qdrant.livenessProbe | nindent 12 }}
+          {{- end }}
+          {{- if .Values.qdrant.readinessProbe }}
+          readinessProbe:
+            {{- toYaml .Values.qdrant.readinessProbe | nindent 12 }}
+          {{- end }}
+          {{- if .Values.qdrant.resources }}
+          {{- include "customer-stack.resources" .Values.qdrant.resources | nindent 10 }}
+          {{- end }}
+          securityContext:
+            {{- include "customer-stack.podSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            {{- if .Values.qdrant.persistence.enabled }}
+            - name: data
+              mountPath: {{ .Values.qdrant.persistence.mountPath }}
+            {{- end }}
+      {{- with .Values.qdrant.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.qdrant.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.qdrant.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  {{- if .Values.qdrant.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "qdrant.labels" . | nindent 10 }}
+      spec:
+        accessModes:
+          - {{ .Values.qdrant.persistence.accessMode }}
+        {{- if .Values.qdrant.persistence.storageClass }}
+        storageClassName: {{ .Values.qdrant.persistence.storageClass }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.qdrant.persistence.size }}
+  {{- end }}
+{{- end }}

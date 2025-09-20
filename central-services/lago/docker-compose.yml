@@ -1,0 +1,222 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: lago-postgres
+    environment:
+      POSTGRES_DB: lago
+      POSTGRES_USER: lago
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    ports:
+      - "5433:5432"  # Different port to avoid conflict with LiteLLM
+    networks:
+      - lago-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lago -d lago"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  redis:
+    image: redis:7-alpine
+    container_name: lago-redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6380:6379"  # Different port to avoid conflict with LiteLLM
+    networks:
+      - lago-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  lago-api:
+    image: getlago/api:latest
+    container_name: lago-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # Database Configuration
+      DATABASE_URL: postgresql://lago:${POSTGRES_PASSWORD}@postgres:5432/lago
+      
+      # Redis Configuration
+      REDIS_URL: redis://redis:6379
+      
+      # Application Configuration
+      RAILS_ENV: production
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE}
+      ENCRYPTION_PRIMARY_KEY: ${ENCRYPTION_PRIMARY_KEY}
+      ENCRYPTION_DETERMINISTIC_KEY: ${ENCRYPTION_DETERMINISTIC_KEY}
+      ENCRYPTION_KEY_DERIVATION_SALT: ${ENCRYPTION_KEY_DERIVATION_SALT}
+      
+      # API Configuration
+      LAGO_API_URL: ${LAGO_API_URL:-http://localhost:3000}
+      LAGO_FRONT_URL: ${LAGO_FRONT_URL:-http://localhost:8080}
+      
+      # Email Configuration (Optional)
+      LAGO_SMTP_ADDRESS: ${LAGO_SMTP_ADDRESS}
+      LAGO_SMTP_PORT: ${LAGO_SMTP_PORT}
+      LAGO_SMTP_USERNAME: ${LAGO_SMTP_USERNAME}
+      LAGO_SMTP_PASSWORD: ${LAGO_SMTP_PASSWORD}
+      
+      # Webhook Configuration
+      LAGO_WEBHOOK_SECRET: ${LAGO_WEBHOOK_SECRET}
+      
+      # License Configuration (for self-hosted)
+      LAGO_LICENSE: ${LAGO_LICENSE}
+      
+      # Sentry Configuration (Optional)
+      SENTRY_DSN: ${SENTRY_DSN}
+      
+      # AWS Configuration (Optional for S3 storage)
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_REGION: ${AWS_REGION}
+      AWS_S3_BUCKET: ${AWS_S3_BUCKET}
+    volumes:
+      - ./storage:/app/storage
+    ports:
+      - "3000:3000"
+    networks:
+      - lago-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  lago-worker:
+    image: getlago/api:latest
+    container_name: lago-worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # Same environment as API
+      DATABASE_URL: postgresql://lago:${POSTGRES_PASSWORD}@postgres:5432/lago
+      REDIS_URL: redis://redis:6379
+      RAILS_ENV: production
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE}
+      ENCRYPTION_PRIMARY_KEY: ${ENCRYPTION_PRIMARY_KEY}
+      ENCRYPTION_DETERMINISTIC_KEY: ${ENCRYPTION_DETERMINISTIC_KEY}
+      ENCRYPTION_KEY_DERIVATION_SALT: ${ENCRYPTION_KEY_DERIVATION_SALT}
+      LAGO_API_URL: ${LAGO_API_URL:-http://localhost:3000}
+      LAGO_FRONT_URL: ${LAGO_FRONT_URL:-http://localhost:8080}
+      LAGO_SMTP_ADDRESS: ${LAGO_SMTP_ADDRESS}
+      LAGO_SMTP_PORT: ${LAGO_SMTP_PORT}
+      LAGO_SMTP_USERNAME: ${LAGO_SMTP_USERNAME}
+      LAGO_SMTP_PASSWORD: ${LAGO_SMTP_PASSWORD}
+      LAGO_WEBHOOK_SECRET: ${LAGO_WEBHOOK_SECRET}
+      LAGO_LICENSE: ${LAGO_LICENSE}
+      SENTRY_DSN: ${SENTRY_DSN}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_REGION: ${AWS_REGION}
+      AWS_S3_BUCKET: ${AWS_S3_BUCKET}
+    volumes:
+      - ./storage:/app/storage
+    networks:
+      - lago-network
+    restart: unless-stopped
+    command: ["bundle", "exec", "sidekiq"]
+
+  lago-clock:
+    image: getlago/api:latest
+    container_name: lago-clock
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # Same environment as API
+      DATABASE_URL: postgresql://lago:${POSTGRES_PASSWORD}@postgres:5432/lago
+      REDIS_URL: redis://redis:6379
+      RAILS_ENV: production
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE}
+      ENCRYPTION_PRIMARY_KEY: ${ENCRYPTION_PRIMARY_KEY}
+      ENCRYPTION_DETERMINISTIC_KEY: ${ENCRYPTION_DETERMINISTIC_KEY}
+      ENCRYPTION_KEY_DERIVATION_SALT: ${ENCRYPTION_KEY_DERIVATION_SALT}
+      LAGO_API_URL: ${LAGO_API_URL:-http://localhost:3000}
+      LAGO_FRONT_URL: ${LAGO_FRONT_URL:-http://localhost:8080}
+    networks:
+      - lago-network
+    restart: unless-stopped
+    command: ["bundle", "exec", "clockwork", "clock.rb"]
+
+  lago-frontend:
+    image: getlago/front:latest
+    container_name: lago-frontend
+    depends_on:
+      - lago-api
+    environment:
+      API_URL: ${LAGO_API_URL:-http://localhost:3000}
+      APP_ENV: production
+      CODEGEN_API: ${LAGO_API_URL:-http://localhost:3000}
+      LAGO_DISABLE_SIGNUP: ${LAGO_DISABLE_SIGNUP:-false}
+    ports:
+      - "8080:80"
+    networks:
+      - lago-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  lago-api-integration:
+    build: ./api-integration
+    container_name: lago-api-integration
+    depends_on:
+      postgres:
+        condition: service_healthy
+      lago-api:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3002
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: lago
+      DB_USER: lago
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      LAGO_API_URL: http://lago-api:3000
+      LAGO_API_KEY: ${LAGO_API_KEY}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - ./logs:/app/logs
+    ports:
+      - "3002:3002"
+    networks:
+      - lago-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3002/health/live', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) }).on('error', () => process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  lago-network:
+    driver: bridge

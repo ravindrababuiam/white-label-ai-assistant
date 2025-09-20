@@ -1,0 +1,119 @@
+{{- if .Values.openWebUI.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: open-webui
+  namespace: {{ .Values.global.customerName }}-stack
+  labels:
+    {{- include "open-webui.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.openWebUI.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "open-webui.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "open-webui.selectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmaps.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secrets.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "customer-stack.serviceAccountName" . }}
+      securityContext:
+        {{- include "customer-stack.securityContext" . | nindent 8 }}
+      containers:
+        - name: open-webui
+          image: "{{ .Values.openWebUI.image.repository }}:{{ .Values.openWebUI.image.tag }}"
+          imagePullPolicy: {{ .Values.openWebUI.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.openWebUI.service.targetPort }}
+              protocol: TCP
+          env:
+            {{- include "customer-stack.awsEnvVars" . | nindent 12 }}
+            {{- range .Values.openWebUI.env }}
+            - name: {{ .name }}
+              {{- if .value }}
+              value: {{ .value | quote }}
+              {{- else if .valueFrom }}
+              valueFrom:
+                {{- toYaml .valueFrom | nindent 16 }}
+              {{- end }}
+            {{- end }}
+            {{- if .Values.aws.s3.enabled }}
+            - name: AWS_S3_BUCKET_DOCUMENTS
+              valueFrom:
+                configMapKeyRef:
+                  name: aws-config
+                  key: s3-documents-bucket
+            - name: AWS_S3_BUCKET_DATA
+              valueFrom:
+                configMapKeyRef:
+                  name: aws-config
+                  key: s3-data-bucket
+            - name: AWS_S3_REGION
+              valueFrom:
+                configMapKeyRef:
+                  name: aws-config
+                  key: s3-region
+            {{- end }}
+            {{- if not .Values.aws.serviceAccount.create }}
+            {{- if .Values.secrets.aws.accessKeyId }}
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: open-webui-secrets
+                  key: aws-access-key-id
+            {{- end }}
+            {{- if .Values.secrets.aws.secretAccessKey }}
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: open-webui-secrets
+                  key: aws-secret-access-key
+            {{- end }}
+            {{- end }}
+          {{- if .Values.openWebUI.livenessProbe }}
+          livenessProbe:
+            {{- toYaml .Values.openWebUI.livenessProbe | nindent 12 }}
+          {{- end }}
+          {{- if .Values.openWebUI.readinessProbe }}
+          readinessProbe:
+            {{- toYaml .Values.openWebUI.readinessProbe | nindent 12 }}
+          {{- end }}
+          {{- if .Values.openWebUI.resources }}
+          {{- include "customer-stack.resources" .Values.openWebUI.resources | nindent 10 }}
+          {{- end }}
+          securityContext:
+            {{- include "customer-stack.podSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            {{- if .Values.openWebUI.persistence.enabled }}
+            - name: data
+              mountPath: /app/backend/data
+            {{- end }}
+            - name: app-config
+              mountPath: /app/backend/config
+              readOnly: true
+      volumes:
+        {{- if .Values.openWebUI.persistence.enabled }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: open-webui-pvc
+        {{- end }}
+        - name: app-config
+          configMap:
+            name: app-config
+      {{- with .Values.openWebUI.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.openWebUI.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.openWebUI.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

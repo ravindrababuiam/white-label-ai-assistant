@@ -1,0 +1,158 @@
+# Production values for customer-stack
+# Override default values for production environment
+
+global:
+  environment: "production"
+  
+  # Production security context
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000
+
+# Open WebUI Production Configuration
+openWebUI:
+  replicaCount: 3
+  
+  # Production resource limits
+  resources:
+    requests:
+      memory: "1Gi"
+      cpu: "500m"
+    limits:
+      memory: "4Gi"
+      cpu: "2000m"
+      
+  # Production persistence
+  persistence:
+    enabled: true
+    storageClass: "gp3"
+    size: "50Gi"
+    
+  # Production health checks
+  livenessProbe:
+    httpGet:
+      path: /health
+      port: 8080
+    initialDelaySeconds: 60
+    periodSeconds: 30
+    timeoutSeconds: 15
+    failureThreshold: 3
+    
+  readinessProbe:
+    httpGet:
+      path: /health
+      port: 8080
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 10
+    failureThreshold: 3
+    
+  # Production affinity for high availability
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: In
+                values:
+                  - open-webui
+          topologyKey: kubernetes.io/hostname
+
+# Ollama Production Configuration
+ollama:
+  # Production resource limits
+  resources:
+    requests:
+      memory: "4Gi"
+      cpu: "2000m"
+    limits:
+      memory: "16Gi"
+      cpu: "8000m"
+      
+  # Production persistence
+  persistence:
+    enabled: true
+    storageClass: "gp3"
+    size: "500Gi"
+    
+  # Production health checks
+  livenessProbe:
+    httpGet:
+      path: /api/tags
+      port: 11434
+    initialDelaySeconds: 120
+    periodSeconds: 60
+    timeoutSeconds: 30
+    failureThreshold: 3
+    
+  readinessProbe:
+    httpGet:
+      path: /api/tags
+      port: 11434
+    initialDelaySeconds: 60
+    periodSeconds: 30
+    timeoutSeconds: 20
+    failureThreshold: 3
+
+# Qdrant Production Configuration
+qdrant:
+  # Production resource limits
+  resources:
+    requests:
+      memory: "2Gi"
+      cpu: "1000m"
+    limits:
+      memory: "8Gi"
+      cpu: "4000m"
+      
+  # Production persistence
+  persistence:
+    enabled: true
+    storageClass: "gp3"
+    size: "200Gi"
+    
+  # Production health checks
+  livenessProbe:
+    httpGet:
+      path: /health
+      port: 6333
+    initialDelaySeconds: 60
+    periodSeconds: 30
+    timeoutSeconds: 15
+    failureThreshold: 3
+    
+  readinessProbe:
+    httpGet:
+      path: /readyz
+      port: 6333
+    initialDelaySeconds: 30
+    periodSeconds: 15
+    timeoutSeconds: 10
+    failureThreshold: 3
+
+# Production monitoring
+monitoring:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+    namespace: monitoring
+    interval: 30s
+
+# Production autoscaling
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+# Production network policy
+networkPolicy:
+  enabled: true
+
+# Production pod disruption budgets
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2

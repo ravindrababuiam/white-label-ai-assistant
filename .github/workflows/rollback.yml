@@ -1,0 +1,496 @@
+name: Rollback Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      customer_name:
+        description: 'Customer name to rollback'
+        required: true
+        type: string
+      rollback_type:
+        description: 'Type of rollback to perform'
+        required: true
+        type: choice
+        options:
+          - application-only
+          - infrastructure-only
+          - full-rollback
+      target_revision:
+        description: 'Target revision to rollback to (leave empty for previous)'
+        required: false
+        type: string
+      aws_region:
+        description: 'AWS region'
+        required: true
+        default: 'us-west-2'
+        type: choice
+        options:
+          - us-east-1
+          - us-west-2
+          - eu-west-1
+          - ap-southeast-1
+
+env:
+  TERRAFORM_VERSION: '1.5.0'
+  HELM_VERSION: '3.12.0'
+
+jobs:
+  validate-rollback-request:
+    name: Validate Rollback Request
+    runs-on: ubuntu-latest
+    outputs:
+      customer_name: ${{ steps.validate.outputs.customer_name }}
+      rollback_type: ${{ steps.validate.outputs.rollback_type }}
+      target_revision: ${{ steps.validate.outputs.target_revision }}
+      aws_region: ${{ steps.validate.outputs.aws_region }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate rollback request
+        id: validate
+        run: |
+          # Validate customer name format
+          if [[ ! "${{ inputs.customer_name }}" =~ ^[a-z0-9-]+$ ]]; then
+            echo "❌ Customer name must contain only lowercase letters, numbers, and hyphens"
+            exit 1
+          fi
+          
+          # Check if customer environment exists
+          if [[ ! -d "terraform/environments/${{ inputs.customer_name }}" ]]; then
+            echo "❌ Customer environment not found: ${{ inputs.customer_name }}"
+            exit 1
+          fi
+          
+          # Set outputs
+          echo "customer_name=${{ inputs.customer_name }}" >> $GITHUB_OUTPUT
+          echo "rollback_type=${{ inputs.rollback_type }}" >> $GITHUB_OUTPUT
+          echo "target_revision=${{ inputs.target_revision }}" >> $GITHUB_OUTPUT
+          echo "aws_region=${{ inputs.aws_region }}" >> $GITHUB_OUTPUT
+          
+          echo "✅ Rollback request validation passed"
+
+  approval-gate:
+    name: Rollback Approval
+    runs-on: ubuntu-latest
+    needs: validate-rollback-request
+    environment: rollback-approval
+    steps:
+      - name: Rollback approval required
+        run: |
+          echo "🔒 Rollback requires manual approval"
+          echo "Customer: ${{ inputs.customer_name }}"
+          echo "Rollback Type: ${{ inputs.rollback_type }}"
+          echo "Target Revision: ${{ inputs.target_revision || 'Previous' }}"
+          echo "Region: ${{ inputs.aws_region }}"
+
+  pre-rollback-backup:
+    name: Pre-Rollback Backup
+    runs-on: ubuntu-latest
+    needs: [validate-rollback-request, approval-gate]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Create pre-rollback backup
+        run: |
+          echo "📦 Creating pre-rollback backup for customer: ${{ inputs.customer_name }}"
+          
+          TIMESTAMP=$(date -u +"%Y-%m-%d-%H-%M")
+          
+          # Create RDS snapshots
+          echo "Creating RDS snapshots..."
+          
+          # LiteLLM database snapshot
+          aws rds create-db-snapshot \
+            --region ${{ inputs.aws_region }} \
+            --db-instance-identifier ${{ inputs.customer_name }}-litellm-db \
+            --db-snapshot-identifier ${{ inputs.customer_name }}-litellm-pre-rollback-$TIMESTAMP || echo "LiteLLM snapshot may have failed"
+          
+          # Lago database snapshot
+          aws rds create-db-snapshot \
+            --region ${{ inputs.aws_region }} \
+            --db-instance-identifier ${{ inputs.customer_name }}-lago-db \
+            --db-snapshot-identifier ${{ inputs.customer_name }}-lago-pre-rollback-$TIMESTAMP || echo "Lago snapshot may have failed"
+          
+          # Create EBS snapshots for persistent volumes
+          echo "Creating EBS snapshots..."
+          
+          # Get EBS volumes associated with the customer
+          VOLUME_IDS=$(aws ec2 describe-volumes \
+            --region ${{ inputs.aws_region }} \
+            --filters "Name=tag:Customer,Values=${{ inputs.customer_name }}" \
+            --query 'Volumes[].VolumeId' \
+            --output text)
+          
+          for VOLUME_ID in $VOLUME_IDS; do
+            if [[ -n "$VOLUME_ID" ]]; then
+              echo "Creating snapshot for volume: $VOLUME_ID"
+              aws ec2 create-snapshot \
+                --region ${{ inputs.aws_region }} \
+                --volume-id $VOLUME_ID \
+                --description "Pre-rollback backup for ${{ inputs.customer_name }} - $TIMESTAMP" \
+                --tag-specifications "ResourceType=snapshot,Tags=[{Key=Customer,Value=${{ inputs.customer_name }}},{Key=BackupType,Value=pre-rollback},{Key=Timestamp,Value=$TIMESTAMP}]" || echo "Snapshot for $VOLUME_ID may have failed"
+            fi
+          done
+          
+          echo "✅ Pre-rollback backup initiated"
+
+  application-rollback:
+    name: Application Rollback
+    runs-on: ubuntu-latest
+    needs: [validate-rollback-request, approval-gate, pre-rollback-backup]
+    if: inputs.rollback_type == 'application-only' || inputs.rollback_type == 'full-rollback'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig --region ${{ inputs.aws_region }} --name ${{ inputs.customer_name }}-eks-cluster
+
+      - name: Get rollback target
+        id: rollback-target
+        run: |
+          echo "🔍 Determining rollback target..."
+          
+          # Get Helm release history
+          HISTORY=$(helm history ${{ inputs.customer_name }} -n ${{ inputs.customer_name }}-stack --max 10 -o json)
+          
+          if [[ -n "${{ inputs.target_revision }}" ]]; then
+            TARGET_REVISION="${{ inputs.target_revision }}"
+            echo "Using specified target revision: $TARGET_REVISION"
+          else
+            # Get the previous successful revision
+            TARGET_REVISION=$(echo "$HISTORY" | jq -r '.[] | select(.status == "deployed") | .revision' | sort -nr | sed -n '2p')
+            if [[ -z "$TARGET_REVISION" ]]; then
+              echo "❌ No previous successful revision found"
+              exit 1
+            fi
+            echo "Using previous successful revision: $TARGET_REVISION"
+          fi
+          
+          echo "target_revision=$TARGET_REVISION" >> $GITHUB_OUTPUT
+
+      - name: Perform Helm rollback
+        run: |
+          echo "🔄 Rolling back Helm deployment..."
+          
+          TARGET_REVISION="${{ steps.rollback-target.outputs.target_revision }}"
+          
+          # Perform the rollback
+          helm rollback ${{ inputs.customer_name }} $TARGET_REVISION -n ${{ inputs.customer_name }}-stack --wait --timeout=10m
+          
+          echo "✅ Helm rollback completed to revision: $TARGET_REVISION"
+
+      - name: Validate application rollback
+        run: |
+          echo "🔍 Validating application rollback..."
+          
+          # Wait for pods to be ready after rollback
+          kubectl wait --for=condition=Ready pods --all -n ${{ inputs.customer_name }}-stack --timeout=300s
+          
+          # Check pod status
+          RUNNING_PODS=$(kubectl get pods -n ${{ inputs.customer_name }}-stack --field-selector=status.phase=Running --no-headers | wc -l)
+          echo "Running pods after rollback: $RUNNING_PODS"
+          
+          if [[ "$RUNNING_PODS" -lt "3" ]]; then
+            echo "❌ Expected at least 3 running pods after rollback, found: $RUNNING_PODS"
+            kubectl get pods -n ${{ inputs.customer_name }}-stack
+            exit 1
+          fi
+          
+          # Check Helm release status
+          RELEASE_STATUS=$(helm status ${{ inputs.customer_name }} -n ${{ inputs.customer_name }}-stack -o json | jq -r '.info.status')
+          echo "Helm release status: $RELEASE_STATUS"
+          
+          if [[ "$RELEASE_STATUS" != "deployed" ]]; then
+            echo "❌ Helm release is not in deployed status: $RELEASE_STATUS"
+            exit 1
+          fi
+          
+          echo "✅ Application rollback validation passed"
+
+  infrastructure-rollback:
+    name: Infrastructure Rollback
+    runs-on: ubuntu-latest
+    needs: [validate-rollback-request, approval-gate, pre-rollback-backup]
+    if: inputs.rollback_type == 'infrastructure-only' || inputs.rollback_type == 'full-rollback'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Get Terraform rollback target
+        id: terraform-target
+        working-directory: terraform/environments/${{ inputs.customer_name }}
+        run: |
+          echo "🔍 Determining Terraform rollback target..."
+          
+          # Initialize Terraform
+          terraform init
+          
+          # Get current state
+          terraform show -json > current-state.json
+          
+          if [[ -n "${{ inputs.target_revision }}" ]]; then
+            echo "Using specified Git revision: ${{ inputs.target_revision }}"
+            git checkout ${{ inputs.target_revision }} -- .
+          else
+            echo "Using previous commit"
+            git checkout HEAD~1 -- .
+          fi
+          
+          echo "✅ Terraform rollback target determined"
+
+      - name: Plan infrastructure rollback
+        working-directory: terraform/environments/${{ inputs.customer_name }}
+        run: |
+          echo "📊 Planning infrastructure rollback..."
+          
+          # Plan the rollback
+          terraform plan -out=rollback-plan
+          
+          # Show the plan
+          terraform show rollback-plan
+
+      - name: Apply infrastructure rollback
+        working-directory: terraform/environments/${{ inputs.customer_name }}
+        run: |
+          echo "🔄 Applying infrastructure rollback..."
+          
+          # Apply the rollback plan
+          terraform apply rollback-plan
+          
+          echo "✅ Infrastructure rollback completed"
+
+      - name: Validate infrastructure rollback
+        run: |
+          echo "🔍 Validating infrastructure rollback..."
+          
+          # Check EKS cluster
+          CLUSTER_STATUS=$(aws eks describe-cluster --region ${{ inputs.aws_region }} --name ${{ inputs.customer_name }}-eks-cluster --query 'cluster.status' --output text)
+          echo "EKS Cluster Status: $CLUSTER_STATUS"
+          
+          if [[ "$CLUSTER_STATUS" != "ACTIVE" ]]; then
+            echo "❌ EKS cluster is not active after rollback"
+            exit 1
+          fi
+          
+          # Check RDS instances
+          RDS_COUNT=$(aws rds describe-db-instances --region ${{ inputs.aws_region }} --query "length(DBInstances[?contains(DBInstanceIdentifier, '${{ inputs.customer_name }}') && DBInstanceStatus=='available'])")
+          echo "Available RDS instances: $RDS_COUNT"
+          
+          if [[ "$RDS_COUNT" -lt "2" ]]; then
+            echo "❌ Expected 2 RDS instances after rollback, found: $RDS_COUNT"
+            exit 1
+          fi
+          
+          echo "✅ Infrastructure rollback validation passed"
+
+  post-rollback-validation:
+    name: Post-Rollback Validation
+    runs-on: ubuntu-latest
+    needs: [validate-rollback-request, application-rollback, infrastructure-rollback]
+    if: always() && (needs.application-rollback.result == 'success' || needs.application-rollback.result == 'skipped') && (needs.infrastructure-rollback.result == 'success' || needs.infrastructure-rollback.result == 'skipped')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Comprehensive post-rollback validation
+        run: |
+          echo "🔍 Performing comprehensive post-rollback validation..."
+          
+          # Configure kubectl
+          aws eks update-kubeconfig --region ${{ inputs.aws_region }} --name ${{ inputs.customer_name }}-eks-cluster
+          
+          # Check overall system health
+          echo "Checking system health..."
+          
+          # Check pods
+          kubectl get pods -n ${{ inputs.customer_name }}-stack
+          
+          # Check services
+          kubectl get services -n ${{ inputs.customer_name }}-stack
+          
+          # Test application health
+          LOADBALANCER_URL=$(kubectl get service open-webui-service -n ${{ inputs.customer_name }}-stack -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
+          
+          if [[ -n "$LOADBALANCER_URL" ]]; then
+            echo "Testing application health at: http://$LOADBALANCER_URL:8080"
+            sleep 60  # Wait for services to stabilize
+            
+            if curl -f "http://$LOADBALANCER_URL:8080/health" --connect-timeout 30; then
+              echo "✅ Application health check passed after rollback"
+            else
+              echo "⚠️ Application health check failed (may still be stabilizing)"
+            fi
+          fi
+          
+          echo "✅ Post-rollback validation completed"
+
+  cleanup-failed-resources:
+    name: Cleanup Failed Resources
+    runs-on: ubuntu-latest
+    needs: [validate-rollback-request, application-rollback, infrastructure-rollback]
+    if: failure()
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Cleanup failed rollback resources
+        run: |
+          echo "🧹 Cleaning up failed rollback resources..."
+          
+          # This is a safety net to clean up any resources that might be in a bad state
+          # after a failed rollback
+          
+          echo "Checking for stuck resources..."
+          
+          # Check for stuck Helm releases
+          if command -v helm &> /dev/null; then
+            aws eks update-kubeconfig --region ${{ inputs.aws_region }} --name ${{ inputs.customer_name }}-eks-cluster || true
+            
+            HELM_STATUS=$(helm status ${{ inputs.customer_name }} -n ${{ inputs.customer_name }}-stack -o json 2>/dev/null | jq -r '.info.status' || echo "unknown")
+            echo "Helm release status: $HELM_STATUS"
+            
+            if [[ "$HELM_STATUS" == "failed" || "$HELM_STATUS" == "pending-rollback" ]]; then
+              echo "Attempting to recover Helm release..."
+              helm rollback ${{ inputs.customer_name }} -n ${{ inputs.customer_name }}-stack || echo "Helm recovery failed"
+            fi
+          fi
+          
+          echo "Cleanup completed"
+
+  generate-rollback-report:
+    name: Generate Rollback Report
+    runs-on: ubuntu-latest
+    needs: [validate-rollback-request, application-rollback, infrastructure-rollback, post-rollback-validation]
+    if: always()
+    steps:
+      - name: Generate rollback report
+        run: |
+          cat > rollback-report.md << EOF
+          # Rollback Report
+          
+          ## Rollback Information
+          - **Customer**: ${{ inputs.customer_name }}
+          - **Rollback Type**: ${{ inputs.rollback_type }}
+          - **Target Revision**: ${{ inputs.target_revision || 'Previous' }}
+          - **Region**: ${{ inputs.aws_region }}
+          - **Rollback Date**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          
+          ## Rollback Results
+          - **Application Rollback**: ${{ needs.application-rollback.result }}
+          - **Infrastructure Rollback**: ${{ needs.infrastructure-rollback.result }}
+          - **Post-Rollback Validation**: ${{ needs.post-rollback-validation.result }}
+          
+          ## Status Summary
+          $(if [[ "${{ needs.application-rollback.result }}" == "success" && "${{ needs.infrastructure-rollback.result }}" == "success" ]]; then
+            echo "✅ **Overall Status**: Rollback completed successfully"
+          elif [[ "${{ needs.application-rollback.result }}" == "success" || "${{ needs.infrastructure-rollback.result }}" == "success" ]]; then
+            echo "⚠️ **Overall Status**: Partial rollback completed"
+          else
+            echo "❌ **Overall Status**: Rollback failed"
+          fi)
+          
+          ## Next Steps
+          1. Verify application functionality
+          2. Monitor system stability
+          3. Investigate root cause of issues that led to rollback
+          4. Plan remediation if needed
+          
+          ## Support Information
+          - **Customer Environment**: terraform/environments/${{ inputs.customer_name }}
+          - **Namespace**: ${{ inputs.customer_name }}-stack
+          - **Workflow Run**: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
+
+      - name: Upload rollback report
+        uses: actions/upload-artifact@v4
+        with:
+          name: rollback-report-${{ inputs.customer_name }}
+          path: rollback-report.md
+
+  notification:
+    name: Send Notification
+    runs-on: ubuntu-latest
+    needs: [validate-rollback-request, application-rollback, infrastructure-rollback, post-rollback-validation]
+    if: always()
+    steps:
+      - name: Determine rollback status
+        id: status
+        run: |
+          if [[ "${{ needs.application-rollback.result }}" == "success" && "${{ needs.infrastructure-rollback.result }}" == "success" ]]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "message=✅ Rollback completed successfully" >> $GITHUB_OUTPUT
+          elif [[ "${{ needs.application-rollback.result }}" == "success" || "${{ needs.infrastructure-rollback.result }}" == "success" ]]; then
+            echo "status=partial" >> $GITHUB_OUTPUT
+            echo "message=⚠️ Partial rollback completed" >> $GITHUB_OUTPUT
+          else
+            echo "status=failure" >> $GITHUB_OUTPUT
+            echo "message=❌ Rollback failed" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create notification summary
+        run: |
+          echo "📋 Rollback Status: ${{ steps.status.outputs.status }}"
+          echo "📝 Message: ${{ steps.status.outputs.message }}"
+          echo "👤 Customer: ${{ inputs.customer_name }}"
+          echo "🔄 Rollback Type: ${{ inputs.rollback_type }}"
+          echo "📍 Region: ${{ inputs.aws_region }}"

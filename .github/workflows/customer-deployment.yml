@@ -1,0 +1,425 @@
+name: Customer Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      customer_name:
+        description: 'Customer name to deploy'
+        required: true
+        type: string
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+      aws_region:
+        description: 'AWS region for deployment'
+        required: true
+        default: 'us-west-2'
+        type: choice
+        options:
+          - us-east-1
+          - us-west-2
+          - eu-west-1
+          - ap-southeast-1
+      enable_gpu:
+        description: 'Enable GPU support for Ollama'
+        required: false
+        type: boolean
+        default: false
+      deployment_type:
+        description: 'Type of deployment'
+        required: true
+        type: choice
+        options:
+          - infrastructure-only
+          - applications-only
+          - full-deployment
+      create_subaccount:
+        description: 'Create AWS subaccount'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  TERRAFORM_VERSION: '1.5.0'
+  HELM_VERSION: '3.12.0'
+
+jobs:
+  validate-deployment-request:
+    name: Validate Deployment Request
+    runs-on: ubuntu-latest
+    outputs:
+      customer_name: ${{ steps.validate.outputs.customer_name }}
+      environment: ${{ steps.validate.outputs.environment }}
+      aws_region: ${{ steps.validate.outputs.aws_region }}
+      enable_gpu: ${{ steps.validate.outputs.enable_gpu }}
+      deployment_type: ${{ steps.validate.outputs.deployment_type }}
+      create_subaccount: ${{ steps.validate.outputs.create_subaccount }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate deployment request
+        id: validate
+        run: |
+          # Validate customer name format
+          if [[ ! "${{ inputs.customer_name }}" =~ ^[a-z0-9-]+$ ]]; then
+            echo "❌ Customer name must contain only lowercase letters, numbers, and hyphens"
+            exit 1
+          fi
+          
+          # Check if customer already exists for non-production environments
+          if [[ "${{ inputs.environment }}" != "production" ]]; then
+            if [[ -d "terraform/environments/${{ inputs.customer_name }}" ]]; then
+              echo "⚠️ Customer environment already exists: ${{ inputs.customer_name }}"
+            fi
+          fi
+          
+          # Validate GPU requirements for production
+          if [[ "${{ inputs.enable_gpu }}" == "true" && "${{ inputs.environment }}" == "production" ]]; then
+            echo "⚠️ GPU-enabled production deployment - additional costs will apply"
+          fi
+          
+          # Set outputs
+          echo "customer_name=${{ inputs.customer_name }}" >> $GITHUB_OUTPUT
+          echo "environment=${{ inputs.environment }}" >> $GITHUB_OUTPUT
+          echo "aws_region=${{ inputs.aws_region }}" >> $GITHUB_OUTPUT
+          echo "enable_gpu=${{ inputs.enable_gpu }}" >> $GITHUB_OUTPUT
+          echo "deployment_type=${{ inputs.deployment_type }}" >> $GITHUB_OUTPUT
+          echo "create_subaccount=${{ inputs.create_subaccount }}" >> $GITHUB_OUTPUT
+          
+          echo "✅ Deployment request validation passed"
+
+  approval-gate:
+    name: Deployment Approval
+    runs-on: ubuntu-latest
+    needs: validate-deployment-request
+    if: inputs.environment == 'production'
+    environment: production-approval
+    steps:
+      - name: Production deployment approval
+        run: |
+          echo "🔒 Production deployment requires manual approval"
+          echo "Customer: ${{ inputs.customer_name }}"
+          echo "Environment: ${{ inputs.environment }}"
+          echo "Region: ${{ inputs.aws_region }}"
+          echo "GPU Enabled: ${{ inputs.enable_gpu }}"
+          echo "Deployment Type: ${{ inputs.deployment_type }}"
+
+  aws-subaccount-setup:
+    name: AWS Subaccount Setup
+    runs-on: ubuntu-latest
+    needs: [validate-deployment-request, approval-gate]
+    if: always() && needs.validate-deployment-request.outputs.create_subaccount == 'true' && (needs.approval-gate.result == 'success' || needs.approval-gate.result == 'skipped')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Setup AWS subaccount
+        run: |
+          echo "🏢 Setting up AWS subaccount for customer: ${{ inputs.customer_name }}"
+          
+          pwsh -File scripts/aws-subaccount-setup.ps1 \
+            -CustomerName "${{ inputs.customer_name }}" \
+            -CustomerEmail "admin@${{ inputs.customer_name }}.com"
+
+  infrastructure-deployment:
+    name: Infrastructure Deployment
+    runs-on: ubuntu-latest
+    needs: [validate-deployment-request, approval-gate, aws-subaccount-setup]
+    if: always() && (inputs.deployment_type == 'infrastructure-only' || inputs.deployment_type == 'full-deployment') && (needs.approval-gate.result == 'success' || needs.approval-gate.result == 'skipped')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Deploy infrastructure
+        run: |
+          echo "🏗️ Deploying infrastructure for customer: ${{ inputs.customer_name }}"
+          
+          pwsh -File scripts/customer-onboarding.ps1 \
+            -CustomerName "${{ inputs.customer_name }}" \
+            -AwsRegion "${{ inputs.aws_region }}" \
+            -Environment "${{ inputs.environment }}" \
+            -EnableGpu:$${{ inputs.enable_gpu }}
+
+      - name: Validate infrastructure
+        run: |
+          echo "🔍 Validating infrastructure deployment..."
+          
+          # Check EKS cluster
+          CLUSTER_STATUS=$(aws eks describe-cluster --region ${{ inputs.aws_region }} --name ${{ inputs.customer_name }}-eks-cluster --query 'cluster.status' --output text)
+          echo "EKS Cluster Status: $CLUSTER_STATUS"
+          
+          if [[ "$CLUSTER_STATUS" != "ACTIVE" ]]; then
+            echo "❌ EKS cluster is not active"
+            exit 1
+          fi
+          
+          # Check RDS instances
+          RDS_COUNT=$(aws rds describe-db-instances --region ${{ inputs.aws_region }} --query "length(DBInstances[?contains(DBInstanceIdentifier, '${{ inputs.customer_name }}') && DBInstanceStatus=='available'])")
+          echo "Available RDS instances: $RDS_COUNT"
+          
+          if [[ "$RDS_COUNT" -lt "2" ]]; then
+            echo "❌ Expected 2 RDS instances, found: $RDS_COUNT"
+            exit 1
+          fi
+          
+          echo "✅ Infrastructure validation passed"
+
+  application-deployment:
+    name: Application Deployment
+    runs-on: ubuntu-latest
+    needs: [validate-deployment-request, approval-gate, infrastructure-deployment]
+    if: always() && (inputs.deployment_type == 'applications-only' || inputs.deployment_type == 'full-deployment') && (needs.approval-gate.result == 'success' || needs.approval-gate.result == 'skipped') && (needs.infrastructure-deployment.result == 'success' || needs.infrastructure-deployment.result == 'skipped')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig --region ${{ inputs.aws_region }} --name ${{ inputs.customer_name }}-eks-cluster
+
+      - name: Deploy applications
+        run: |
+          echo "📦 Deploying applications for customer: ${{ inputs.customer_name }}"
+          
+          pwsh -File helm-charts/deploy-helm-chart.ps1 \
+            -CustomerName "${{ inputs.customer_name }}" \
+            -Environment "${{ inputs.environment }}" \
+            -AwsRegion "${{ inputs.aws_region }}" \
+            -EnableGpu:$${{ inputs.enable_gpu }}
+
+      - name: Validate application deployment
+        run: |
+          echo "🔍 Validating application deployment..."
+          
+          # Wait for pods to be ready
+          kubectl wait --for=condition=Ready pods --all -n ${{ inputs.customer_name }}-stack --timeout=600s
+          
+          # Check pod status
+          RUNNING_PODS=$(kubectl get pods -n ${{ inputs.customer_name }}-stack --field-selector=status.phase=Running --no-headers | wc -l)
+          echo "Running pods: $RUNNING_PODS"
+          
+          if [[ "$RUNNING_PODS" -lt "3" ]]; then
+            echo "❌ Expected at least 3 running pods, found: $RUNNING_PODS"
+            kubectl get pods -n ${{ inputs.customer_name }}-stack
+            exit 1
+          fi
+          
+          # Get LoadBalancer URL
+          LOADBALANCER_URL=$(kubectl get service open-webui-service -n ${{ inputs.customer_name }}-stack -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
+          
+          if [[ -n "$LOADBALANCER_URL" ]]; then
+            echo "✅ Application accessible at: http://$LOADBALANCER_URL:8080"
+          else
+            echo "⚠️ LoadBalancer URL not yet available"
+          fi
+          
+          echo "✅ Application deployment validation passed"
+
+  gitops-setup:
+    name: GitOps Setup
+    runs-on: ubuntu-latest
+    needs: [validate-deployment-request, application-deployment]
+    if: always() && needs.application-deployment.result == 'success'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Generate ArgoCD Application
+        run: |
+          echo "🔄 Setting up GitOps for customer: ${{ inputs.customer_name }}"
+          
+          # Get AWS Account ID
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text)
+          
+          pwsh -File gitops/generate-argocd-app.ps1 \
+            -CustomerName "${{ inputs.customer_name }}" \
+            -Environment "${{ inputs.environment }}" \
+            -AwsRegion "${{ inputs.aws_region }}" \
+            -AwsAccountId "$AWS_ACCOUNT_ID" \
+            -EnableGpu:$${{ inputs.enable_gpu }}
+
+      - name: Commit GitOps configurations
+        run: |
+          # Configure git
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          
+          # Add generated files
+          git add gitops/applications/
+          
+          # Check if there are changes to commit
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Add GitOps configuration for customer: ${{ inputs.customer_name }}"
+            git push
+            echo "✅ GitOps configurations committed"
+          fi
+
+  post-deployment-validation:
+    name: Post-Deployment Validation
+    runs-on: ubuntu-latest
+    needs: [validate-deployment-request, infrastructure-deployment, application-deployment]
+    if: always() && (needs.infrastructure-deployment.result == 'success' || needs.infrastructure-deployment.result == 'skipped') && (needs.application-deployment.result == 'success' || needs.application-deployment.result == 'skipped')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Comprehensive validation
+        run: |
+          echo "🔍 Performing comprehensive post-deployment validation..."
+          
+          # Configure kubectl
+          aws eks update-kubeconfig --region ${{ inputs.aws_region }} --name ${{ inputs.customer_name }}-eks-cluster
+          
+          # Run validation script
+          pwsh -File check-aws-deployment.ps1
+          
+          # Additional health checks
+          echo "Checking application health endpoints..."
+          
+          LOADBALANCER_URL=$(kubectl get service open-webui-service -n ${{ inputs.customer_name }}-stack -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
+          
+          if [[ -n "$LOADBALANCER_URL" ]]; then
+            # Wait for LoadBalancer to be ready
+            sleep 120
+            
+            # Test health endpoint
+            if curl -f "http://$LOADBALANCER_URL:8080/health" --connect-timeout 30; then
+              echo "✅ Application health check passed"
+            else
+              echo "⚠️ Application health check failed (may still be initializing)"
+            fi
+          fi
+
+  generate-deployment-report:
+    name: Generate Deployment Report
+    runs-on: ubuntu-latest
+    needs: [validate-deployment-request, infrastructure-deployment, application-deployment, gitops-setup, post-deployment-validation]
+    if: always()
+    steps:
+      - name: Generate deployment report
+        run: |
+          cat > deployment-report.md << EOF
+          # Customer Deployment Report
+          
+          ## Deployment Information
+          - **Customer**: ${{ inputs.customer_name }}
+          - **Environment**: ${{ inputs.environment }}
+          - **Region**: ${{ inputs.aws_region }}
+          - **GPU Enabled**: ${{ inputs.enable_gpu }}
+          - **Deployment Type**: ${{ inputs.deployment_type }}
+          - **Subaccount Created**: ${{ inputs.create_subaccount }}
+          - **Deployment Date**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          
+          ## Deployment Results
+          - **Infrastructure**: ${{ needs.infrastructure-deployment.result }}
+          - **Applications**: ${{ needs.application-deployment.result }}
+          - **GitOps Setup**: ${{ needs.gitops-setup.result }}
+          - **Validation**: ${{ needs.post-deployment-validation.result }}
+          
+          ## Access Information
+          - **Namespace**: ${{ inputs.customer_name }}-stack
+          - **EKS Cluster**: ${{ inputs.customer_name }}-eks-cluster
+          - **Region**: ${{ inputs.aws_region }}
+          
+          ## Next Steps
+          1. Verify application functionality
+          2. Configure customer-specific settings
+          3. Set up monitoring and alerting
+          4. Provide customer training
+          
+          ## Support Information
+          - **Terraform Directory**: terraform/environments/${{ inputs.customer_name }}
+          - **GitOps Configuration**: gitops/applications/${{ inputs.customer_name }}-${{ inputs.environment }}.yaml
+          - **Workflow Run**: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
+
+      - name: Upload deployment report
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-report-${{ inputs.customer_name }}
+          path: deployment-report.md
+
+  notification:
+    name: Send Notification
+    runs-on: ubuntu-latest
+    needs: [validate-deployment-request, infrastructure-deployment, application-deployment, post-deployment-validation]
+    if: always()
+    steps:
+      - name: Determine deployment status
+        id: status
+        run: |
+          if [[ "${{ needs.infrastructure-deployment.result }}" == "success" && "${{ needs.application-deployment.result }}" == "success" ]]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "message=✅ Customer deployment completed successfully" >> $GITHUB_OUTPUT
+          elif [[ "${{ needs.infrastructure-deployment.result }}" == "success" ]]; then
+            echo "status=partial" >> $GITHUB_OUTPUT
+            echo "message=⚠️ Infrastructure deployed but application deployment failed" >> $GITHUB_OUTPUT
+          else
+            echo "status=failure" >> $GITHUB_OUTPUT
+            echo "message=❌ Customer deployment failed" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create notification summary
+        run: |
+          echo "📋 Deployment Status: ${{ steps.status.outputs.status }}"
+          echo "📝 Message: ${{ steps.status.outputs.message }}"
+          echo "👤 Customer: ${{ inputs.customer_name }}"
+          echo "🌍 Environment: ${{ inputs.environment }}"
+          echo "📍 Region: ${{ inputs.aws_region }}"

@@ -1,0 +1,131 @@
+{
+  "servers": [
+    {
+      "id": "agency-mcp-server",
+      "name": "Agency MCP Server",
+      "description": "Main agency MCP server for task execution",
+      "endpoint": "https://agency-mcp.example.com/mcp",
+      "protocol": "sse",
+      "authentication": {
+        "type": "bearer",
+        "token": "${AGENCY_MCP_TOKEN}"
+      },
+      "enabled": true,
+      "healthCheck": {
+        "enabled": true,
+        "interval": 30000,
+        "timeout": 5000,
+        "retries": 3
+      },
+      "timeout": 30000,
+      "retryPolicy": {
+        "enabled": true,
+        "maxRetries": 3,
+        "backoffMultiplier": 2,
+        "initialDelay": 1000
+      },
+      "tags": ["agency", "production", "task-execution"]
+    },
+    {
+      "id": "local-file-server",
+      "name": "Local File Management Server",
+      "description": "Local MCP server for file operations",
+      "endpoint": "stdio://local",
+      "protocol": "stdio",
+      "command": "uvx",
+      "args": ["mcp-server-filesystem", "/workspace"],
+      "env": {
+        "PYTHONPATH": "/usr/local/lib/python3.11/site-packages",
+        "LOG_LEVEL": "INFO"
+      },
+      "enabled": true,
+      "healthCheck": {
+        "enabled": true,
+        "interval": 60000,
+        "timeout": 10000,
+        "retries": 2
+      },
+      "tags": ["local", "filesystem", "development"]
+    },
+    {
+      "id": "database-mcp-server",
+      "name": "Database MCP Server",
+      "description": "MCP server for database operations",
+      "endpoint": "wss://db-mcp.example.com/ws",
+      "protocol": "websocket",
+      "authentication": {
+        "type": "api-key",
+        "token": "${DB_MCP_API_KEY}",
+        "header": "X-API-Key"
+      },
+      "enabled": true,
+      "healthCheck": {
+        "enabled": true,
+        "interval": 45000,
+        "timeout": 8000,
+        "retries": 3
+      },
+      "timeout": 25000,
+      "retryPolicy": {
+        "enabled": true,
+        "maxRetries": 2,
+        "backoffMultiplier": 1.5,
+        "initialDelay": 500
+      },
+      "tags": ["database", "production", "data-access"]
+    },
+    {
+      "id": "web-scraper-server",
+      "name": "Web Scraper MCP Server",
+      "description": "MCP server for web scraping capabilities",
+      "endpoint": "https://scraper-mcp.example.com/api/mcp",
+      "protocol": "sse",
+      "authentication": {
+        "type": "basic",
+        "username": "${SCRAPER_USERNAME}",
+        "password": "${SCRAPER_PASSWORD}"
+      },
+      "enabled": false,
+      "healthCheck": {
+        "enabled": true,
+        "interval": 120000,
+        "timeout": 15000,
+        "retries": 2
+      },
+      "timeout": 60000,
+      "retryPolicy": {
+        "enabled": true,
+        "maxRetries": 5,
+        "backoffMultiplier": 2,
+        "initialDelay": 2000
+      },
+      "tags": ["web-scraping", "external", "optional"]
+    },
+    {
+      "id": "calendar-integration",
+      "name": "Calendar Integration Server",
+      "description": "MCP server for calendar and scheduling operations",
+      "endpoint": "https://calendar-mcp.example.com",
+      "protocol": "sse",
+      "authentication": {
+        "type": "bearer",
+        "token": "${CALENDAR_MCP_TOKEN}"
+      },
+      "enabled": true,
+      "healthCheck": {
+        "enabled": true,
+        "interval": 30000,
+        "timeout": 5000,
+        "retries": 3
+      },
+      "timeout": 20000,
+      "retryPolicy": {
+        "enabled": true,
+        "maxRetries": 3,
+        "backoffMultiplier": 2,
+        "initialDelay": 1000
+      },
+      "tags": ["calendar", "scheduling", "integration", "production"]
+    }
+  ]
+}

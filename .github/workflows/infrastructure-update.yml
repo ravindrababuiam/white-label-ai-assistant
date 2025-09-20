@@ -1,0 +1,419 @@
+name: Infrastructure Update
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'terraform/**'
+      - 'helm-charts/**'
+      - 'scripts/**'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'terraform/**'
+      - 'helm-charts/**'
+      - 'scripts/**'
+
+env:
+  TERRAFORM_VERSION: '1.5.0'
+  HELM_VERSION: '3.12.0'
+
+jobs:
+  detect-changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      terraform_changed: ${{ steps.changes.outputs.terraform }}
+      helm_changed: ${{ steps.changes.outputs.helm }}
+      scripts_changed: ${{ steps.changes.outputs.scripts }}
+      customers_affected: ${{ steps.customers.outputs.customers }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect file changes
+        uses: dorny/paths-filter@v2
+        id: changes
+        with:
+          filters: |
+            terraform:
+              - 'terraform/**'
+            helm:
+              - 'helm-charts/**'
+            scripts:
+              - 'scripts/**'
+
+      - name: Identify affected customers
+        id: customers
+        run: |
+          # Find all customer environments
+          CUSTOMERS=$(find terraform/environments -maxdepth 1 -type d -name "*" ! -name "customer-template" ! -name "environments" | xargs -n1 basename | jq -R -s -c 'split("\n")[:-1]')
+          echo "customers=$CUSTOMERS" >> $GITHUB_OUTPUT
+          echo "Found customers: $CUSTOMERS"
+
+  terraform-validation:
+    name: Terraform Validation
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.terraform_changed == 'true'
+    strategy:
+      matrix:
+        customer: ${{ fromJson(needs.detect-changes.outputs.customers_affected) }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-west-2
+
+      - name: Terraform format check
+        working-directory: terraform/environments/${{ matrix.customer }}
+        run: terraform fmt -check -recursive
+
+      - name: Terraform initialization
+        working-directory: terraform/environments/${{ matrix.customer }}
+        run: terraform init
+
+      - name: Terraform validation
+        working-directory: terraform/environments/${{ matrix.customer }}
+        run: terraform validate
+
+      - name: Terraform plan
+        working-directory: terraform/environments/${{ matrix.customer }}
+        run: |
+          terraform plan -detailed-exitcode -out=tfplan
+          terraform show -json tfplan > plan.json
+
+      - name: Upload Terraform plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-${{ matrix.customer }}
+          path: terraform/environments/${{ matrix.customer }}/plan.json
+
+  helm-validation:
+    name: Helm Chart Validation
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.helm_changed == 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Helm lint
+        run: |
+          helm lint helm-charts/customer-stack
+
+      - name: Helm template validation
+        run: |
+          # Test with different value combinations
+          echo "Testing default values..."
+          helm template test-customer helm-charts/customer-stack \
+            --set global.customerName=test-customer \
+            --dry-run > /dev/null
+
+          echo "Testing production values..."
+          helm template test-customer helm-charts/customer-stack \
+            --values helm-charts/customer-stack/values-production.yaml \
+            --set global.customerName=test-customer \
+            --dry-run > /dev/null
+
+          echo "Testing GPU values..."
+          helm template test-customer helm-charts/customer-stack \
+            --values helm-charts/customer-stack/values-gpu.yaml \
+            --set global.customerName=test-customer \
+            --dry-run > /dev/null
+
+      - name: Helm security scan
+        run: |
+          # Install helm-secrets plugin for security scanning
+          helm plugin install https://github.com/jkroepke/helm-secrets || true
+          
+          # Basic security checks
+          echo "Checking for hardcoded secrets..."
+          if grep -r "password\|secret\|key" helm-charts/customer-stack/templates/ --include="*.yaml" | grep -v "secretKeyRef\|configMapKeyRef"; then
+            echo "⚠️ Potential hardcoded secrets found"
+          else
+            echo "✅ No hardcoded secrets detected"
+          fi
+
+  script-validation:
+    name: Script Validation
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.scripts_changed == 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: PowerShell script analysis
+        run: |
+          # Install PSScriptAnalyzer
+          pwsh -Command "Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser"
+          
+          # Analyze PowerShell scripts
+          echo "Analyzing PowerShell scripts..."
+          find scripts/ -name "*.ps1" -exec pwsh -Command "Invoke-ScriptAnalyzer -Path '{}' -Severity Warning,Error" \;
+
+      - name: Shell script validation
+        run: |
+          # Install shellcheck
+          sudo apt-get update && sudo apt-get install -y shellcheck
+          
+          # Check shell scripts
+          echo "Validating shell scripts..."
+          find . -name "*.sh" -exec shellcheck {} \;
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Check for sensitive data
+        run: |
+          # Install truffleHog
+          curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin
+          
+          # Scan for secrets
+          trufflehog git file://. --only-verified
+
+  approval-gate:
+    name: Approval Gate
+    runs-on: ubuntu-latest
+    needs: [terraform-validation, helm-validation, script-validation, security-scan]
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    environment: production-approval
+    steps:
+      - name: Manual approval required
+        run: |
+          echo "🔒 Manual approval required for production deployment"
+          echo "This step requires approval from authorized personnel"
+
+  auto-deployment:
+    name: Auto Deployment
+    runs-on: ubuntu-latest
+    needs: [detect-changes, terraform-validation, helm-validation]
+    if: |
+      github.event_name == 'push' && 
+      github.ref == 'refs/heads/main' && 
+      (needs.detect-changes.outputs.terraform_changed == 'true' || needs.detect-changes.outputs.helm_changed == 'true')
+    strategy:
+      matrix:
+        customer: ${{ fromJson(needs.detect-changes.outputs.customers_affected) }}
+      max-parallel: 3
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-west-2
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Check customer environment exists
+        id: check-customer
+        run: |
+          if [ -d "terraform/environments/${{ matrix.customer }}" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Customer environment exists: ${{ matrix.customer }}"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "Customer environment does not exist: ${{ matrix.customer }}"
+          fi
+
+      - name: Update infrastructure
+        if: steps.check-customer.outputs.exists == 'true' && needs.detect-changes.outputs.terraform_changed == 'true'
+        working-directory: terraform/environments/${{ matrix.customer }}
+        run: |
+          echo "🔄 Updating infrastructure for customer: ${{ matrix.customer }}"
+          
+          terraform init
+          terraform plan -out=tfplan
+          terraform apply tfplan
+
+      - name: Configure kubectl
+        if: steps.check-customer.outputs.exists == 'true'
+        run: |
+          aws eks update-kubeconfig --region us-west-2 --name ${{ matrix.customer }}-eks-cluster
+
+      - name: Update applications
+        if: steps.check-customer.outputs.exists == 'true' && needs.detect-changes.outputs.helm_changed == 'true'
+        run: |
+          echo "📦 Updating applications for customer: ${{ matrix.customer }}"
+          
+          # Get customer configuration
+          CUSTOMER_CONFIG=""
+          if [ -f "customers/${{ matrix.customer }}.conf" ]; then
+            CUSTOMER_CONFIG="-ValuesFile customers/${{ matrix.customer }}.conf"
+          fi
+          
+          # Upgrade Helm deployment
+          pwsh -File helm-charts/deploy-helm-chart.ps1 \
+            -CustomerName "${{ matrix.customer }}" \
+            -Upgrade \
+            $CUSTOMER_CONFIG
+
+      - name: Validate deployment
+        if: steps.check-customer.outputs.exists == 'true'
+        run: |
+          echo "🔍 Validating deployment for customer: ${{ matrix.customer }}"
+          
+          # Wait for pods to be ready
+          kubectl wait --for=condition=Ready pods --all -n ${{ matrix.customer }}-stack --timeout=300s
+          
+          # Check deployment status
+          kubectl get pods -n ${{ matrix.customer }}-stack
+          kubectl get services -n ${{ matrix.customer }}-stack
+
+  rollback-preparation:
+    name: Prepare Rollback
+    runs-on: ubuntu-latest
+    needs: [auto-deployment]
+    if: failure()
+    strategy:
+      matrix:
+        customer: ${{ fromJson(needs.detect-changes.outputs.customers_affected) }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-west-2
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig --region us-west-2 --name ${{ matrix.customer }}-eks-cluster
+
+      - name: Rollback Helm deployment
+        run: |
+          echo "🔄 Rolling back Helm deployment for customer: ${{ matrix.customer }}"
+          
+          # Get previous revision
+          PREVIOUS_REVISION=$(helm history ${{ matrix.customer }} -n ${{ matrix.customer }}-stack --max 2 -o json | jq -r '.[0].revision')
+          
+          if [ "$PREVIOUS_REVISION" != "null" ] && [ "$PREVIOUS_REVISION" != "1" ]; then
+            echo "Rolling back to revision: $PREVIOUS_REVISION"
+            helm rollback ${{ matrix.customer }} $PREVIOUS_REVISION -n ${{ matrix.customer }}-stack
+          else
+            echo "No previous revision available for rollback"
+          fi
+
+      - name: Validate rollback
+        run: |
+          echo "🔍 Validating rollback for customer: ${{ matrix.customer }}"
+          
+          # Wait for pods to be ready after rollback
+          kubectl wait --for=condition=Ready pods --all -n ${{ matrix.customer }}-stack --timeout=300s
+          
+          # Check rollback status
+          kubectl get pods -n ${{ matrix.customer }}-stack
+          helm status ${{ matrix.customer }} -n ${{ matrix.customer }}-stack
+
+  notification:
+    name: Send Notification
+    runs-on: ubuntu-latest
+    needs: [auto-deployment, rollback-preparation]
+    if: always()
+    steps:
+      - name: Determine status
+        id: status
+        run: |
+          if [[ "${{ needs.auto-deployment.result }}" == "success" ]]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "message=✅ Infrastructure update completed successfully" >> $GITHUB_OUTPUT
+          elif [[ "${{ needs.rollback-preparation.result }}" == "success" ]]; then
+            echo "status=warning" >> $GITHUB_OUTPUT
+            echo "message=⚠️ Deployment failed but rollback completed successfully" >> $GITHUB_OUTPUT
+          else
+            echo "status=failure" >> $GITHUB_OUTPUT
+            echo "message=❌ Infrastructure update failed" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create update summary
+        run: |
+          cat > update-summary.md << EOF
+          # Infrastructure Update Summary
+          
+          **Branch**: ${{ github.ref_name }}  
+          **Commit**: ${{ github.sha }}  
+          **Status**: ${{ steps.status.outputs.status }}  
+          **Message**: ${{ steps.status.outputs.message }}  
+          
+          **Changes**:
+          - Terraform: ${{ needs.detect-changes.outputs.terraform_changed }}
+          - Helm Charts: ${{ needs.detect-changes.outputs.helm_changed }}
+          - Scripts: ${{ needs.detect-changes.outputs.scripts_changed }}
+          
+          **Workflow Run**: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
+
+      - name: Upload update summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: update-summary
+          path: update-summary.md

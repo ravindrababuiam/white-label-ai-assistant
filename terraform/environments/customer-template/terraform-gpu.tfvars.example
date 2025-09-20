@@ -1,0 +1,37 @@
+# Example Terraform Variables File for GPU-enabled deployment
+# Copy this file to terraform.tfvars and customize for your customer
+
+# Customer Configuration
+customer_name = "ai-startup"
+environment   = "prod"
+aws_region    = "us-west-2"
+
+# Network Configuration
+vpc_cidr           = "10.1.0.0/16"
+availability_zones = ["us-west-2a", "us-west-2b"]
+
+# EKS Configuration
+kubernetes_version    = "1.28"
+enable_public_access  = true
+public_access_cidrs   = ["203.0.113.0/24"]  # Replace with your office IP range
+log_retention_days    = 14
+
+# Node Group Configuration (smaller for cost optimization)
+node_capacity_type   = "SPOT"  # Use spot instances for cost savings
+node_instance_types  = ["t3.small", "t3.medium"]
+node_desired_size    = 1
+node_max_size        = 3
+node_min_size        = 1
+node_disk_size       = 30
+
+# GPU Node Configuration (enabled for Ollama)
+enable_gpu_nodes      = true
+gpu_instance_types    = ["g4dn.xlarge", "g4dn.2xlarge"]
+gpu_node_desired_size = 1
+gpu_node_max_size     = 2
+gpu_node_min_size     = 0
+gpu_node_disk_size    = 200  # Larger disk for model storage
+
+# SSH Access (enabled for debugging)
+enable_node_ssh_access = true
+node_ssh_key_name      = "my-ec2-keypair"  # Replace with your EC2 key pair name

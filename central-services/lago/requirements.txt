@@ -1,0 +1,8 @@
+# Lago Setup Script Dependencies
+aiohttp==3.9.1
+asyncio-mqtt==0.16.1
+
+# Optional dependencies for enhanced functionality
+python-dotenv==1.0.0
+click==8.1.7
+pydantic==2.5.0

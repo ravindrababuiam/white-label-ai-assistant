@@ -1,0 +1,82 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: customer-stack-CUSTOMER_NAME
+  namespace: argocd
+  labels:
+    customer: CUSTOMER_NAME
+    environment: ENVIRONMENT
+    app.kubernetes.io/part-of: white-label-ai-assistant
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: customer-environments
+  source:
+    repoURL: https://github.com/your-org/white-label-ai-assistant
+    targetRevision: main
+    path: helm-charts/customer-stack
+    helm:
+      valueFiles:
+        - values.yaml
+        - values-ENVIRONMENT.yaml
+      parameters:
+        - name: global.customerName
+          value: CUSTOMER_NAME
+        - name: global.environment
+          value: ENVIRONMENT
+        - name: global.region
+          value: AWS_REGION
+        - name: global.aws.region
+          value: AWS_REGION
+        - name: global.aws.accountId
+          value: AWS_ACCOUNT_ID
+        # AWS Resource Endpoints (populated by automation)
+        - name: aws.s3.buckets.documents
+          value: S3_DOCUMENTS_BUCKET
+        - name: aws.s3.buckets.data
+          value: S3_DATA_BUCKET
+        - name: aws.rds.endpoints.litellm
+          value: RDS_LITELLM_ENDPOINT
+        - name: aws.rds.endpoints.lago
+          value: RDS_LAGO_ENDPOINT
+        - name: aws.elasticache.endpoints.litellm
+          value: REDIS_LITELLM_ENDPOINT
+        - name: aws.elasticache.endpoints.lago
+          value: REDIS_LAGO_ENDPOINT
+        - name: aws.serviceAccount.annotations.eks\.amazonaws\.com/role-arn
+          value: SERVICE_ACCOUNT_ROLE_ARN
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: CUSTOMER_NAME-stack
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+  revisionHistoryLimit: 10
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas
+    - group: ""
+      kind: Service
+      jsonPointers:
+        - /spec/clusterIP
+  info:
+    - name: Customer
+      value: CUSTOMER_NAME
+    - name: Environment
+      value: ENVIRONMENT
+    - name: Region
+      value: AWS_REGION

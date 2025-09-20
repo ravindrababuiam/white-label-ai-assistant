@@ -1,0 +1,55 @@
+{{- if and .Values.ollama.enabled .Values.ollama.models.initJob.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ollama-model-init
+  namespace: {{ .Values.global.customerName }}-stack
+  labels:
+    {{- include "ollama.labels" . | nindent 4 }}
+    app.kubernetes.io/component: model-init
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "1"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  template:
+    metadata:
+      labels:
+        {{- include "ollama.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: model-init
+    spec:
+      serviceAccountName: {{ include "customer-stack.serviceAccountName" . }}
+      restartPolicy: OnFailure
+      containers:
+        - name: model-init
+          image: "{{ .Values.ollama.models.initJob.image.repository }}:{{ .Values.ollama.models.initJob.image.tag }}"
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              echo "Waiting for Ollama service to be ready..."
+              until curl -f http://ollama-service:11434/api/tags; do
+                echo "Waiting for Ollama..."
+                sleep 10
+              done
+              
+              echo "Ollama is ready, downloading models..."
+              {{- range .Values.ollama.models.preload }}
+              echo "Downloading model: {{ . }}"
+              curl -X POST http://ollama-service:11434/api/pull -d '{"name":"{{ . }"}' || echo "Failed to download {{ . }}"
+              {{- end }}
+              
+              echo "Model initialization completed"
+          {{- if .Values.ollama.models.initJob.resources }}
+          {{- include "customer-stack.resources" .Values.ollama.models.initJob.resources | nindent 10 }}
+          {{- end }}
+      {{- with .Values.ollama.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.ollama.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

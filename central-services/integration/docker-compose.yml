@@ -1,0 +1,137 @@
+version: '3.8'
+
+services:
+  integration-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: litellm-lago-integration
+    environment:
+      # Database Configuration
+      DATABASE_URL: postgresql://integration:${POSTGRES_PASSWORD}@postgres:5432/integration
+      
+      # LiteLLM Configuration
+      LITELLM_API_URL: ${LITELLM_API_URL:-http://litellm:4000}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      
+      # Lago Configuration
+      LAGO_API_URL: ${LAGO_API_URL:-http://lago-api:3000}
+      LAGO_API_KEY: ${LAGO_API_KEY}
+      LAGO_WEBHOOK_SECRET: ${LAGO_WEBHOOK_SECRET}
+      
+      # Service Configuration
+      PORT: 8080
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      WEBHOOK_TIMEOUT: ${WEBHOOK_TIMEOUT:-30}
+      MAX_RETRIES: ${MAX_RETRIES:-3}
+      RETRY_DELAY: ${RETRY_DELAY:-60}
+      
+      # Redis Configuration
+      REDIS_URL: redis://redis:6379
+      
+      # Monitoring
+      ENABLE_METRICS: ${ENABLE_METRICS:-true}
+      METRICS_PORT: 9090
+      
+    volumes:
+      - ./logs:/app/logs
+      - ./config:/app/config
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+    networks:
+      - integration-network
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: integration-postgres
+    environment:
+      POSTGRES_DB: integration
+      POSTGRES_USER: integration
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    ports:
+      - "5434:5432"
+    networks:
+      - integration-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U integration -d integration"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  redis:
+    image: redis:7-alpine
+    container_name: integration-redis
+    ports:
+      - "6381:6379"
+    networks:
+      - integration-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: integration-worker
+    environment:
+      # Database Configuration
+      DATABASE_URL: postgresql://integration:${POSTGRES_PASSWORD}@postgres:5432/integration
+      
+      # LiteLLM Configuration
+      LITELLM_API_URL: ${LITELLM_API_URL:-http://litellm:4000}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      
+      # Lago Configuration
+      LAGO_API_URL: ${LAGO_API_URL:-http://lago-api:3000}
+      LAGO_API_KEY: ${LAGO_API_KEY}
+      LAGO_WEBHOOK_SECRET: ${LAGO_WEBHOOK_SECRET}
+      
+      # Worker Configuration
+      WORKER_MODE: "true"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      MAX_RETRIES: ${MAX_RETRIES:-3}
+      RETRY_DELAY: ${RETRY_DELAY:-60}
+      BATCH_SIZE: ${BATCH_SIZE:-100}
+      
+      # Redis Configuration
+      REDIS_URL: redis://redis:6379
+      
+    volumes:
+      - ./logs:/app/logs
+      - ./config:/app/config
+    networks:
+      - integration-network
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["python", "worker.py"]
+
+volumes:
+  postgres_data:
+
+networks:
+  integration-network:
+    driver: bridge

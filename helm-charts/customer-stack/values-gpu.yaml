@@ -1,0 +1,109 @@
+# GPU-enabled values for customer-stack
+# Override default values for GPU-enabled deployments
+
+# Ollama GPU Configuration
+ollama:
+  # Enable GPU support
+  gpu:
+    enabled: true
+    nvidia:
+      runtimeClassName: "nvidia"
+      resources:
+        requests:
+          memory: "8Gi"
+          cpu: "4000m"
+        limits:
+          memory: "32Gi"
+          cpu: "16000m"
+          nvidia.com/gpu: 1
+          
+  # GPU-specific environment variables
+  env:
+    - name: OLLAMA_HOST
+      value: "0.0.0.0:11434"
+    - name: OLLAMA_ORIGINS
+      value: "*"
+    - name: OLLAMA_KEEP_ALIVE
+      value: "24h"
+    - name: OLLAMA_MAX_LOADED_MODELS
+      value: "5"
+    - name: CUDA_VISIBLE_DEVICES
+      value: "0"
+    - name: NVIDIA_VISIBLE_DEVICES
+      value: "all"
+    - name: NVIDIA_DRIVER_CAPABILITIES
+      value: "compute,utility"
+      
+  # GPU node selector
+  nodeSelector:
+    accelerator: nvidia-tesla-k80
+    node.kubernetes.io/instance-type: g4dn.xlarge
+    
+  # GPU tolerations
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+    - key: accelerator
+      operator: Equal
+      value: nvidia-tesla-k80
+      effect: NoSchedule
+      
+  # Larger persistence for GPU models
+  persistence:
+    enabled: true
+    storageClass: "gp3"
+    size: "1Ti"
+    
+  # GPU-optimized models
+  models:
+    preload:
+      - "llama3.1:8b"
+      - "llama3.1:70b"
+      - "codellama:13b"
+      - "nomic-embed-text"
+      - "mistral:7b"
+      - "phi3:medium"
+    initJob:
+      enabled: true
+      resources:
+        requests:
+          memory: "1Gi"
+          cpu: "500m"
+        limits:
+          memory: "2Gi"
+          cpu: "1000m"
+
+# Open WebUI optimized for GPU backend
+openWebUI:
+  # Additional environment for GPU optimization
+  env:
+    - name: OLLAMA_BASE_URL
+      value: "http://ollama-service:11434"
+    - name: WEBUI_SECRET_KEY
+      valueFrom:
+        secretKeyRef:
+          name: open-webui-secrets
+          key: secret-key
+    - name: ENABLE_RAG_WEB_SEARCH
+      value: "true"
+    - name: ENABLE_RAG_LOCAL_WEB_FETCH
+      value: "true"
+    - name: RAG_EMBEDDING_ENGINE
+      value: "ollama"
+    - name: RAG_EMBEDDING_MODEL
+      value: "nomic-embed-text"
+    - name: QDRANT_URI
+      value: "http://qdrant-service:6333"
+    - name: ENABLE_COMMUNITY_SHARING
+      value: "false"
+    - name: WEBUI_AUTH
+      value: "true"
+    - name: DEFAULT_MODELS
+      value: "llama3.1:8b,llama3.1:70b,codellama:13b"
+    - name: DEFAULT_USER_ROLE
+      value: "user"
+    - name: ENABLE_SIGNUP
+      value: "false"
+    - name: OLLAMA_GPU_ENABLED
+      value: "true"

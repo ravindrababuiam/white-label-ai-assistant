@@ -1,0 +1,563 @@
+name: Disaster Recovery
+
+on:
+  workflow_dispatch:
+    inputs:
+      customer_name:
+        description: 'Customer name to recover'
+        required: true
+        type: string
+      recovery_type:
+        description: 'Type of recovery to perform'
+        required: true
+        type: choice
+        options:
+          - backup-restore
+          - full-rebuild
+          - cross-region-failover
+      source_region:
+        description: 'Source AWS region'
+        required: true
+        default: 'us-west-2'
+        type: choice
+        options:
+          - us-east-1
+          - us-west-2
+          - eu-west-1
+          - ap-southeast-1
+      target_region:
+        description: 'Target AWS region (for failover)'
+        required: false
+        default: 'us-east-1'
+        type: choice
+        options:
+          - us-east-1
+          - us-west-2
+          - eu-west-1
+          - ap-southeast-1
+      backup_timestamp:
+        description: 'Backup timestamp (YYYY-MM-DD-HH-MM) for restore'
+        required: false
+        type: string
+
+env:
+  TERRAFORM_VERSION: '1.5.0'
+  HELM_VERSION: '3.12.0'
+
+jobs:
+  validate-recovery-request:
+    name: Validate Recovery Request
+    runs-on: ubuntu-latest
+    outputs:
+      customer_name: ${{ steps.validate.outputs.customer_name }}
+      recovery_type: ${{ steps.validate.outputs.recovery_type }}
+      source_region: ${{ steps.validate.outputs.source_region }}
+      target_region: ${{ steps.validate.outputs.target_region }}
+      backup_timestamp: ${{ steps.validate.outputs.backup_timestamp }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate recovery request
+        id: validate
+        run: |
+          # Validate customer name format
+          if [[ ! "${{ inputs.customer_name }}" =~ ^[a-z0-9-]+$ ]]; then
+            echo "❌ Customer name must contain only lowercase letters, numbers, and hyphens"
+            exit 1
+          fi
+          
+          # Validate backup timestamp format if provided
+          if [[ -n "${{ inputs.backup_timestamp }}" ]]; then
+            if [[ ! "${{ inputs.backup_timestamp }}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{2}-[0-9]{2}$ ]]; then
+              echo "❌ Backup timestamp must be in format YYYY-MM-DD-HH-MM"
+              exit 1
+            fi
+          fi
+          
+          # Validate cross-region failover parameters
+          if [[ "${{ inputs.recovery_type }}" == "cross-region-failover" ]]; then
+            if [[ "${{ inputs.source_region }}" == "${{ inputs.target_region }}" ]]; then
+              echo "❌ Source and target regions must be different for cross-region failover"
+              exit 1
+            fi
+          fi
+          
+          # Set outputs
+          echo "customer_name=${{ inputs.customer_name }}" >> $GITHUB_OUTPUT
+          echo "recovery_type=${{ inputs.recovery_type }}" >> $GITHUB_OUTPUT
+          echo "source_region=${{ inputs.source_region }}" >> $GITHUB_OUTPUT
+          echo "target_region=${{ inputs.target_region }}" >> $GITHUB_OUTPUT
+          echo "backup_timestamp=${{ inputs.backup_timestamp }}" >> $GITHUB_OUTPUT
+          
+          echo "✅ Recovery request validation passed"
+
+  assess-damage:
+    name: Assess Damage
+    runs-on: ubuntu-latest
+    needs: validate-recovery-request
+    outputs:
+      infrastructure_status: ${{ steps.assess.outputs.infrastructure_status }}
+      application_status: ${{ steps.assess.outputs.application_status }}
+      data_status: ${{ steps.assess.outputs.data_status }}
+      recovery_plan: ${{ steps.assess.outputs.recovery_plan }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.source_region }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Assess infrastructure damage
+        id: assess
+        run: |
+          echo "🔍 Assessing damage for customer: ${{ inputs.customer_name }}"
+          
+          INFRASTRUCTURE_STATUS="unknown"
+          APPLICATION_STATUS="unknown"
+          DATA_STATUS="unknown"
+          
+          # Check EKS cluster
+          if aws eks describe-cluster --region ${{ inputs.source_region }} --name ${{ inputs.customer_name }}-eks-cluster >/dev/null 2>&1; then
+            CLUSTER_STATUS=$(aws eks describe-cluster --region ${{ inputs.source_region }} --name ${{ inputs.customer_name }}-eks-cluster --query 'cluster.status' --output text)
+            if [[ "$CLUSTER_STATUS" == "ACTIVE" ]]; then
+              INFRASTRUCTURE_STATUS="healthy"
+              echo "✅ EKS cluster is healthy"
+            else
+              INFRASTRUCTURE_STATUS="degraded"
+              echo "⚠️ EKS cluster status: $CLUSTER_STATUS"
+            fi
+          else
+            INFRASTRUCTURE_STATUS="failed"
+            echo "❌ EKS cluster not found or inaccessible"
+          fi
+          
+          # Check RDS instances
+          RDS_COUNT=$(aws rds describe-db-instances --region ${{ inputs.source_region }} --query "length(DBInstances[?contains(DBInstanceIdentifier, '${{ inputs.customer_name }}') && DBInstanceStatus=='available'])" 2>/dev/null || echo "0")
+          if [[ "$RDS_COUNT" -ge "2" ]]; then
+            DATA_STATUS="healthy"
+            echo "✅ RDS instances are healthy"
+          elif [[ "$RDS_COUNT" -gt "0" ]]; then
+            DATA_STATUS="degraded"
+            echo "⚠️ Some RDS instances are unhealthy"
+          else
+            DATA_STATUS="failed"
+            echo "❌ RDS instances not found or failed"
+          fi
+          
+          # Check applications if infrastructure is healthy
+          if [[ "$INFRASTRUCTURE_STATUS" == "healthy" ]]; then
+            if aws eks update-kubeconfig --region ${{ inputs.source_region }} --name ${{ inputs.customer_name }}-eks-cluster >/dev/null 2>&1; then
+              RUNNING_PODS=$(kubectl get pods -n ${{ inputs.customer_name }}-stack --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l || echo "0")
+              if [[ "$RUNNING_PODS" -ge "3" ]]; then
+                APPLICATION_STATUS="healthy"
+                echo "✅ Applications are running"
+              elif [[ "$RUNNING_PODS" -gt "0" ]]; then
+                APPLICATION_STATUS="degraded"
+                echo "⚠️ Some applications are not running"
+              else
+                APPLICATION_STATUS="failed"
+                echo "❌ Applications are not running"
+              fi
+            else
+              APPLICATION_STATUS="failed"
+              echo "❌ Cannot access Kubernetes cluster"
+            fi
+          else
+            APPLICATION_STATUS="failed"
+            echo "❌ Applications cannot be assessed due to infrastructure issues"
+          fi
+          
+          # Determine recovery plan
+          RECOVERY_PLAN="unknown"
+          if [[ "$INFRASTRUCTURE_STATUS" == "failed" || "$DATA_STATUS" == "failed" ]]; then
+            RECOVERY_PLAN="full-rebuild"
+          elif [[ "$APPLICATION_STATUS" == "failed" ]]; then
+            RECOVERY_PLAN="application-redeploy"
+          elif [[ "$INFRASTRUCTURE_STATUS" == "degraded" || "$APPLICATION_STATUS" == "degraded" || "$DATA_STATUS" == "degraded" ]]; then
+            RECOVERY_PLAN="partial-recovery"
+          else
+            RECOVERY_PLAN="no-action-needed"
+          fi
+          
+          echo "infrastructure_status=$INFRASTRUCTURE_STATUS" >> $GITHUB_OUTPUT
+          echo "application_status=$APPLICATION_STATUS" >> $GITHUB_OUTPUT
+          echo "data_status=$DATA_STATUS" >> $GITHUB_OUTPUT
+          echo "recovery_plan=$RECOVERY_PLAN" >> $GITHUB_OUTPUT
+          
+          echo "📊 Damage assessment completed"
+          echo "Infrastructure: $INFRASTRUCTURE_STATUS"
+          echo "Applications: $APPLICATION_STATUS"
+          echo "Data: $DATA_STATUS"
+          echo "Recommended plan: $RECOVERY_PLAN"
+
+  backup-restore:
+    name: Backup Restore
+    runs-on: ubuntu-latest
+    needs: [validate-recovery-request, assess-damage]
+    if: inputs.recovery_type == 'backup-restore'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.source_region }}
+
+      - name: List available backups
+        id: backups
+        run: |
+          echo "📋 Listing available backups for customer: ${{ inputs.customer_name }}"
+          
+          # List RDS snapshots
+          echo "RDS Snapshots:"
+          aws rds describe-db-snapshots --region ${{ inputs.source_region }} \
+            --query "DBSnapshots[?contains(DBInstanceIdentifier, '${{ inputs.customer_name }}')].{Snapshot:DBSnapshotIdentifier,Created:SnapshotCreateTime,Status:Status}" \
+            --output table
+          
+          # List EBS snapshots
+          echo "EBS Snapshots:"
+          aws ec2 describe-snapshots --region ${{ inputs.source_region }} --owner-ids self \
+            --query "Snapshots[?contains(Description, '${{ inputs.customer_name }}')].{Snapshot:SnapshotId,Created:StartTime,Status:State}" \
+            --output table
+
+      - name: Restore from backup
+        run: |
+          echo "🔄 Restoring from backup for customer: ${{ inputs.customer_name }}"
+          
+          BACKUP_TIMESTAMP="${{ inputs.backup_timestamp }}"
+          if [[ -z "$BACKUP_TIMESTAMP" ]]; then
+            # Use latest backup if no timestamp specified
+            BACKUP_TIMESTAMP=$(date -u +"%Y-%m-%d-%H-%M")
+            echo "No backup timestamp specified, using latest available"
+          fi
+          
+          # Restore RDS instances
+          echo "Restoring RDS instances..."
+          
+          # Find snapshots matching the timestamp
+          LITELLM_SNAPSHOT=$(aws rds describe-db-snapshots --region ${{ inputs.source_region }} \
+            --query "DBSnapshots[?contains(DBInstanceIdentifier, '${{ inputs.customer_name }}-litellm') && contains(DBSnapshotIdentifier, '$BACKUP_TIMESTAMP')].DBSnapshotIdentifier" \
+            --output text | head -1)
+          
+          LAGO_SNAPSHOT=$(aws rds describe-db-snapshots --region ${{ inputs.source_region }} \
+            --query "DBSnapshots[?contains(DBInstanceIdentifier, '${{ inputs.customer_name }}-lago') && contains(DBSnapshotIdentifier, '$BACKUP_TIMESTAMP')].DBSnapshotIdentifier" \
+            --output text | head -1)
+          
+          if [[ -n "$LITELLM_SNAPSHOT" ]]; then
+            echo "Restoring LiteLLM database from snapshot: $LITELLM_SNAPSHOT"
+            aws rds restore-db-instance-from-db-snapshot \
+              --region ${{ inputs.source_region }} \
+              --db-instance-identifier ${{ inputs.customer_name }}-litellm-db-restored \
+              --db-snapshot-identifier $LITELLM_SNAPSHOT
+          fi
+          
+          if [[ -n "$LAGO_SNAPSHOT" ]]; then
+            echo "Restoring Lago database from snapshot: $LAGO_SNAPSHOT"
+            aws rds restore-db-instance-from-db-snapshot \
+              --region ${{ inputs.source_region }} \
+              --db-instance-identifier ${{ inputs.customer_name }}-lago-db-restored \
+              --db-snapshot-identifier $LAGO_SNAPSHOT
+          fi
+
+      - name: Validate restore
+        run: |
+          echo "🔍 Validating backup restore..."
+          
+          # Wait for RDS instances to be available
+          echo "Waiting for restored RDS instances..."
+          aws rds wait db-instance-available --region ${{ inputs.source_region }} --db-instance-identifier ${{ inputs.customer_name }}-litellm-db-restored || true
+          aws rds wait db-instance-available --region ${{ inputs.source_region }} --db-instance-identifier ${{ inputs.customer_name }}-lago-db-restored || true
+          
+          # Check restore status
+          LITELLM_STATUS=$(aws rds describe-db-instances --region ${{ inputs.source_region }} --db-instance-identifier ${{ inputs.customer_name }}-litellm-db-restored --query 'DBInstances[0].DBInstanceStatus' --output text 2>/dev/null || echo "not-found")
+          LAGO_STATUS=$(aws rds describe-db-instances --region ${{ inputs.source_region }} --db-instance-identifier ${{ inputs.customer_name }}-lago-db-restored --query 'DBInstances[0].DBInstanceStatus' --output text 2>/dev/null || echo "not-found")
+          
+          echo "LiteLLM DB Status: $LITELLM_STATUS"
+          echo "Lago DB Status: $LAGO_STATUS"
+          
+          if [[ "$LITELLM_STATUS" == "available" && "$LAGO_STATUS" == "available" ]]; then
+            echo "✅ Backup restore completed successfully"
+          else
+            echo "❌ Backup restore failed or incomplete"
+            exit 1
+          fi
+
+  full-rebuild:
+    name: Full Rebuild
+    runs-on: ubuntu-latest
+    needs: [validate-recovery-request, assess-damage]
+    if: inputs.recovery_type == 'full-rebuild' || needs.assess-damage.outputs.recovery_plan == 'full-rebuild'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.source_region }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Cleanup failed resources
+        run: |
+          echo "🧹 Cleaning up failed resources for customer: ${{ inputs.customer_name }}"
+          
+          # Check if customer environment exists
+          if [[ -d "terraform/environments/${{ inputs.customer_name }}" ]]; then
+            cd terraform/environments/${{ inputs.customer_name }}
+            
+            # Initialize Terraform
+            terraform init
+            
+            # Destroy failed infrastructure
+            echo "Destroying failed infrastructure..."
+            terraform destroy -auto-approve || echo "Some resources may have already been destroyed"
+          else
+            echo "Customer environment directory not found, skipping cleanup"
+          fi
+
+      - name: Rebuild infrastructure
+        run: |
+          echo "🏗️ Rebuilding infrastructure for customer: ${{ inputs.customer_name }}"
+          
+          # Run complete customer deployment
+          pwsh -File scripts/deploy-customer.ps1 \
+            -CustomerName "${{ inputs.customer_name }}" \
+            -CustomerEmail "recovery@${{ inputs.customer_name }}.com" \
+            -AwsRegion "${{ inputs.source_region }}" \
+            -Environment "production"
+
+      - name: Validate rebuild
+        run: |
+          echo "🔍 Validating infrastructure rebuild..."
+          
+          # Configure kubectl
+          aws eks update-kubeconfig --region ${{ inputs.source_region }} --name ${{ inputs.customer_name }}-eks-cluster
+          
+          # Wait for applications to be ready
+          kubectl wait --for=condition=Ready pods --all -n ${{ inputs.customer_name }}-stack --timeout=600s
+          
+          # Check final status
+          kubectl get pods -n ${{ inputs.customer_name }}-stack
+          kubectl get services -n ${{ inputs.customer_name }}-stack
+          
+          echo "✅ Full rebuild completed successfully"
+
+  cross-region-failover:
+    name: Cross-Region Failover
+    runs-on: ubuntu-latest
+    needs: validate-recovery-request
+    if: inputs.recovery_type == 'cross-region-failover'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (source)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.source_region }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Create cross-region backup
+        run: |
+          echo "📦 Creating cross-region backup..."
+          
+          # Create RDS snapshots and copy to target region
+          TIMESTAMP=$(date -u +"%Y-%m-%d-%H-%M")
+          
+          # Snapshot LiteLLM database
+          aws rds create-db-snapshot \
+            --region ${{ inputs.source_region }} \
+            --db-instance-identifier ${{ inputs.customer_name }}-litellm-db \
+            --db-snapshot-identifier ${{ inputs.customer_name }}-litellm-failover-$TIMESTAMP
+          
+          # Snapshot Lago database
+          aws rds create-db-snapshot \
+            --region ${{ inputs.source_region }} \
+            --db-instance-identifier ${{ inputs.customer_name }}-lago-db \
+            --db-snapshot-identifier ${{ inputs.customer_name }}-lago-failover-$TIMESTAMP
+          
+          # Wait for snapshots to complete
+          aws rds wait db-snapshot-completed \
+            --region ${{ inputs.source_region }} \
+            --db-snapshot-identifier ${{ inputs.customer_name }}-litellm-failover-$TIMESTAMP
+          
+          aws rds wait db-snapshot-completed \
+            --region ${{ inputs.source_region }} \
+            --db-snapshot-identifier ${{ inputs.customer_name }}-lago-failover-$TIMESTAMP
+          
+          # Copy snapshots to target region
+          aws rds copy-db-snapshot \
+            --region ${{ inputs.target_region }} \
+            --source-db-snapshot-identifier arn:aws:rds:${{ inputs.source_region }}:${{ secrets.AWS_ACCOUNT_ID }}:snapshot:${{ inputs.customer_name }}-litellm-failover-$TIMESTAMP \
+            --target-db-snapshot-identifier ${{ inputs.customer_name }}-litellm-failover-$TIMESTAMP
+          
+          aws rds copy-db-snapshot \
+            --region ${{ inputs.target_region }} \
+            --source-db-snapshot-identifier arn:aws:rds:${{ inputs.source_region }}:${{ secrets.AWS_ACCOUNT_ID }}:snapshot:${{ inputs.customer_name }}-lago-failover-$TIMESTAMP \
+            --target-db-snapshot-identifier ${{ inputs.customer_name }}-lago-failover-$TIMESTAMP
+
+      - name: Deploy to target region
+        run: |
+          echo "🚀 Deploying to target region: ${{ inputs.target_region }}"
+          
+          # Deploy customer environment in target region
+          pwsh -File scripts/deploy-customer.ps1 \
+            -CustomerName "${{ inputs.customer_name }}-dr" \
+            -CustomerEmail "dr@${{ inputs.customer_name }}.com" \
+            -AwsRegion "${{ inputs.target_region }}" \
+            -Environment "production"
+
+      - name: Update DNS and routing
+        run: |
+          echo "🔄 Updating DNS and routing for failover..."
+          
+          # Get new LoadBalancer URL
+          aws eks update-kubeconfig --region ${{ inputs.target_region }} --name ${{ inputs.customer_name }}-dr-eks-cluster
+          
+          NEW_LB_URL=$(kubectl get service open-webui-service -n ${{ inputs.customer_name }}-dr-stack -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          
+          echo "New LoadBalancer URL: $NEW_LB_URL"
+          echo "Manual DNS update required to point to new endpoint"
+
+  recovery-validation:
+    name: Recovery Validation
+    runs-on: ubuntu-latest
+    needs: [backup-restore, full-rebuild, cross-region-failover]
+    if: always() && (needs.backup-restore.result == 'success' || needs.full-rebuild.result == 'success' || needs.cross-region-failover.result == 'success')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.recovery_type == 'cross-region-failover' && inputs.target_region || inputs.source_region }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Comprehensive recovery validation
+        run: |
+          echo "🔍 Performing comprehensive recovery validation..."
+          
+          CUSTOMER_NAME="${{ inputs.customer_name }}"
+          REGION="${{ inputs.recovery_type == 'cross-region-failover' && inputs.target_region || inputs.source_region }}"
+          
+          if [[ "${{ inputs.recovery_type }}" == "cross-region-failover" ]]; then
+            CUSTOMER_NAME="${{ inputs.customer_name }}-dr"
+          fi
+          
+          # Check infrastructure
+          echo "Checking EKS cluster..."
+          CLUSTER_STATUS=$(aws eks describe-cluster --region $REGION --name $CUSTOMER_NAME-eks-cluster --query 'cluster.status' --output text)
+          echo "EKS Status: $CLUSTER_STATUS"
+          
+          # Check databases
+          echo "Checking RDS instances..."
+          RDS_COUNT=$(aws rds describe-db-instances --region $REGION --query "length(DBInstances[?contains(DBInstanceIdentifier, '$CUSTOMER_NAME') && DBInstanceStatus=='available'])")
+          echo "Available RDS instances: $RDS_COUNT"
+          
+          # Check applications
+          echo "Checking applications..."
+          aws eks update-kubeconfig --region $REGION --name $CUSTOMER_NAME-eks-cluster
+          
+          kubectl get pods -n $CUSTOMER_NAME-stack
+          kubectl get services -n $CUSTOMER_NAME-stack
+          
+          # Test application health
+          LOADBALANCER_URL=$(kubectl get service open-webui-service -n $CUSTOMER_NAME-stack -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
+          
+          if [[ -n "$LOADBALANCER_URL" ]]; then
+            echo "Testing application health at: http://$LOADBALANCER_URL:8080"
+            sleep 60  # Wait for LoadBalancer to be ready
+            curl -f "http://$LOADBALANCER_URL:8080/health" || echo "Application health check failed (may still be starting)"
+          fi
+          
+          echo "✅ Recovery validation completed"
+
+  generate-recovery-report:
+    name: Generate Recovery Report
+    runs-on: ubuntu-latest
+    needs: [validate-recovery-request, assess-damage, recovery-validation]
+    if: always()
+    steps:
+      - name: Generate recovery report
+        run: |
+          cat > recovery-report.md << EOF
+          # Disaster Recovery Report
+          
+          ## Recovery Request
+          - **Customer**: ${{ inputs.customer_name }}
+          - **Recovery Type**: ${{ inputs.recovery_type }}
+          - **Source Region**: ${{ inputs.source_region }}
+          - **Target Region**: ${{ inputs.target_region }}
+          - **Backup Timestamp**: ${{ inputs.backup_timestamp }}
+          - **Recovery Date**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          
+          ## Damage Assessment
+          - **Infrastructure Status**: ${{ needs.assess-damage.outputs.infrastructure_status }}
+          - **Application Status**: ${{ needs.assess-damage.outputs.application_status }}
+          - **Data Status**: ${{ needs.assess-damage.outputs.data_status }}
+          - **Recommended Plan**: ${{ needs.assess-damage.outputs.recovery_plan }}
+          
+          ## Recovery Results
+          - **Backup Restore**: ${{ needs.backup-restore.result }}
+          - **Full Rebuild**: ${{ needs.full-rebuild.result }}
+          - **Cross-Region Failover**: ${{ needs.cross-region-failover.result }}
+          - **Validation**: ${{ needs.recovery-validation.result }}
+          
+          ## Next Steps
+          1. Verify application functionality
+          2. Update DNS records if needed
+          3. Notify stakeholders of recovery completion
+          4. Schedule post-recovery review
+          
+          **Workflow Run**: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
+
+      - name: Upload recovery report
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-report-${{ inputs.customer_name }}
+          path: recovery-report.md

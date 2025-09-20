@@ -1,0 +1,102 @@
+{{- if .Values.ollama.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ollama
+  namespace: {{ .Values.global.customerName }}-stack
+  labels:
+    {{- include "ollama.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.ollama.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "ollama.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ollama.selectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmaps.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "customer-stack.serviceAccountName" . }}
+      {{- if .Values.ollama.gpu.enabled }}
+      runtimeClassName: {{ .Values.ollama.gpu.nvidia.runtimeClassName }}
+      {{- end }}
+      securityContext:
+        {{- include "customer-stack.securityContext" . | nindent 8 }}
+      containers:
+        - name: ollama
+          image: "{{ .Values.ollama.image.repository }}:{{ .Values.ollama.image.tag }}"
+          imagePullPolicy: {{ .Values.ollama.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.ollama.service.targetPort }}
+              protocol: TCP
+          env:
+            {{- include "customer-stack.awsEnvVars" . | nindent 12 }}
+            {{- range .Values.ollama.env }}
+            - name: {{ .name }}
+              value: {{ .value | quote }}
+            {{- end }}
+          {{- if .Values.ollama.livenessProbe }}
+          livenessProbe:
+            {{- toYaml .Values.ollama.livenessProbe | nindent 12 }}
+          {{- end }}
+          {{- if .Values.ollama.readinessProbe }}
+          readinessProbe:
+            {{- toYaml .Values.ollama.readinessProbe | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- if .Values.ollama.gpu.enabled }}
+            {{- toYaml .Values.ollama.gpu.nvidia.resources | nindent 12 }}
+            {{- else if .Values.ollama.resources }}
+            {{- toYaml .Values.ollama.resources | nindent 12 }}
+            {{- end }}
+          securityContext:
+            {{- include "customer-stack.podSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            {{- if .Values.ollama.persistence.enabled }}
+            - name: data
+              mountPath: {{ .Values.ollama.persistence.mountPath }}
+            {{- end }}
+            - name: model-config
+              mountPath: /etc/ollama
+              readOnly: true
+      volumes:
+        {{- if .Values.ollama.persistence.enabled }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: ollama-pvc
+        {{- end }}
+        - name: model-config
+          configMap:
+            name: model-config
+      {{- with .Values.ollama.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.ollama.gpu.enabled }}
+      nodeSelector:
+        accelerator: nvidia-tesla-k80
+        {{- with .Values.ollama.nodeSelector }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.ollama.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.ollama.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.ollama.gpu.enabled }}
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+        {{- with .Values.ollama.tolerations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+{{- end }}

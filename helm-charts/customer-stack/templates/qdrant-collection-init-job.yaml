@@ -1,0 +1,66 @@
+{{- if and .Values.qdrant.enabled .Values.qdrant.collections.init.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qdrant-collection-init
+  namespace: {{ .Values.global.customerName }}-stack
+  labels:
+    {{- include "qdrant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: collection-init
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "2"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  template:
+    metadata:
+      labels:
+        {{- include "qdrant.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: collection-init
+    spec:
+      serviceAccountName: {{ include "customer-stack.serviceAccountName" . }}
+      restartPolicy: OnFailure
+      containers:
+        - name: collection-init
+          image: curlimages/curl:latest
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              echo "Waiting for Qdrant service to be ready..."
+              until curl -f http://qdrant-service:6333/health; do
+                echo "Waiting for Qdrant..."
+                sleep 10
+              done
+              
+              echo "Qdrant is ready, creating collections..."
+              {{- range .Values.qdrant.collections.init.collections }}
+              echo "Creating collection: {{ .name }}"
+              curl -X PUT "http://qdrant-service:6333/collections/{{ .name }}" \
+                -H "Content-Type: application/json" \
+                -d '{
+                  "vectors": {
+                    "size": {{ .vector_size }},
+                    "distance": "{{ .distance }}"
+                  }
+                }' || echo "Collection {{ .name }} may already exist"
+              {{- end }}
+              
+              echo "Collection initialization completed"
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "100m"
+      {{- with .Values.qdrant.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.qdrant.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

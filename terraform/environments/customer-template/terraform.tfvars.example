@@ -1,0 +1,37 @@
+# Example Terraform Variables File
+# Copy this file to terraform.tfvars and customize for your customer
+
+# Customer Configuration
+customer_name = "acme-corp"
+environment   = "prod"
+aws_region    = "us-west-2"
+
+# Network Configuration
+vpc_cidr           = "10.0.0.0/16"
+availability_zones = ["us-west-2a", "us-west-2b", "us-west-2c"]
+
+# EKS Configuration
+kubernetes_version    = "1.28"
+enable_public_access  = true
+public_access_cidrs   = ["0.0.0.0/0"]  # Restrict this in production
+log_retention_days    = 7
+
+# Node Group Configuration
+node_capacity_type   = "ON_DEMAND"
+node_instance_types  = ["t3.medium"]
+node_desired_size    = 2
+node_max_size        = 4
+node_min_size        = 1
+node_disk_size       = 50
+
+# GPU Node Configuration (for Ollama)
+enable_gpu_nodes      = false  # Set to true if you want GPU support
+gpu_instance_types    = ["g4dn.xlarge"]
+gpu_node_desired_size = 1
+gpu_node_max_size     = 2
+gpu_node_min_size     = 0
+gpu_node_disk_size    = 100
+
+# SSH Access (optional)
+enable_node_ssh_access = false
+node_ssh_key_name      = ""  # Specify EC2 key pair name if SSH access is enabled

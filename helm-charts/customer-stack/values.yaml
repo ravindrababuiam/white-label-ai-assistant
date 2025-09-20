@@ -1,0 +1,455 @@
+# Default values for customer-stack
+# This is a YAML-formatted file for AWS-only deployment
+
+global:
+  customerName: "default-customer"
+  environment: "production"
+  region: "us-west-2"
+  
+  # AWS-specific configurations
+  aws:
+    accountId: ""
+    region: "us-west-2"
+    
+  # Common labels applied to all resources
+  labels:
+    app.kubernetes.io/managed-by: "helm"
+    app.kubernetes.io/part-of: "white-label-ai-assistant"
+    
+  # Image pull policy
+  imagePullPolicy: IfNotPresent
+  
+  # Security context
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000
+
+# Open WebUI Configuration
+openWebUI:
+  enabled: true
+  name: "open-webui"
+  
+  image:
+    repository: "ghcr.io/open-webui/open-webui"
+    tag: "main"
+    pullPolicy: IfNotPresent
+    
+  replicaCount: 2
+  
+  service:
+    type: LoadBalancer
+    port: 8080
+    targetPort: 8080
+    annotations:
+      service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+      service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+      service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "true"
+      
+  ingress:
+    enabled: false
+    className: "aws-load-balancer-controller"
+    annotations:
+      kubernetes.io/ingress.class: alb
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: ip
+    hosts:
+      - host: ""
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+    
+  # Environment variables for AWS integration
+  env:
+    - name: OLLAMA_BASE_URL
+      value: "http://ollama-service:11434"
+    - name: WEBUI_SECRET_KEY
+      valueFrom:
+        secretKeyRef:
+          name: open-webui-secrets
+          key: secret-key
+    - name: ENABLE_RAG_WEB_SEARCH
+      value: "true"
+    - name: ENABLE_RAG_LOCAL_WEB_FETCH
+      value: "true"
+    - name: RAG_EMBEDDING_ENGINE
+      value: "ollama"
+    - name: RAG_EMBEDDING_MODEL
+      value: "nomic-embed-text"
+    - name: QDRANT_URI
+      value: "http://qdrant-service:6333"
+    - name: ENABLE_COMMUNITY_SHARING
+      value: "false"
+    - name: WEBUI_AUTH
+      value: "true"
+      
+  # AWS S3 integration for document storage
+  s3:
+    enabled: true
+    bucketName: ""  # Will be set by customer-specific values
+    region: "us-west-2"
+    accessKeyId: ""
+    secretAccessKey: ""
+    
+  # Persistent storage for user data
+  persistence:
+    enabled: true
+    storageClass: "gp3"
+    size: "10Gi"
+    accessMode: ReadWriteOnce
+    
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "250m"
+    limits:
+      memory: "2Gi"
+      cpu: "1000m"
+      
+  # Health checks
+  livenessProbe:
+    httpGet:
+      path: /health
+      port: 8080
+    initialDelaySeconds: 30
+    periodSeconds: 30
+    timeoutSeconds: 10
+    
+  readinessProbe:
+    httpGet:
+      path: /health
+      port: 8080
+    initialDelaySeconds: 15
+    periodSeconds: 10
+    timeoutSeconds: 5
+    
+  # Node selector for specific instance types
+  nodeSelector: {}
+  
+  # Tolerations for node taints
+  tolerations: []
+  
+  # Pod anti-affinity for high availability
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchExpressions:
+                - key: app.kubernetes.io/name
+                  operator: In
+                  values:
+                    - open-webui
+            topologyKey: kubernetes.io/hostname
+
+# Ollama Configuration
+ollama:
+  enabled: true
+  name: "ollama"
+  
+  image:
+    repository: "ollama/ollama"
+    tag: "latest"
+    pullPolicy: IfNotPresent
+    
+  replicaCount: 1
+  
+  service:
+    type: ClusterIP
+    port: 11434
+    targetPort: 11434
+    
+  # GPU support configuration
+  gpu:
+    enabled: false
+    nvidia:
+      runtimeClassName: "nvidia"
+      resources:
+        limits:
+          nvidia.com/gpu: 1
+          
+  # Environment variables
+  env:
+    - name: OLLAMA_HOST
+      value: "0.0.0.0:11434"
+    - name: OLLAMA_ORIGINS
+      value: "*"
+    - name: OLLAMA_KEEP_ALIVE
+      value: "24h"
+    - name: OLLAMA_MAX_LOADED_MODELS
+      value: "3"
+      
+  # Persistent storage for models
+  persistence:
+    enabled: true
+    storageClass: "gp3"
+    size: "100Gi"
+    accessMode: ReadWriteOnce
+    mountPath: "/root/.ollama"
+    
+  # Resource requirements (higher for GPU nodes)
+  resources:
+    requests:
+      memory: "2Gi"
+      cpu: "1000m"
+    limits:
+      memory: "8Gi"
+      cpu: "4000m"
+      
+  # Health checks
+  livenessProbe:
+    httpGet:
+      path: /api/tags
+      port: 11434
+    initialDelaySeconds: 60
+    periodSeconds: 30
+    timeoutSeconds: 10
+    
+  readinessProbe:
+    httpGet:
+      path: /api/tags
+      port: 11434
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    
+  # Node selector for GPU instances
+  nodeSelector: {}
+  
+  # Tolerations for GPU node taints
+  tolerations: []
+  
+  # Model initialization
+  models:
+    # List of models to pre-download
+    preload:
+      - "llama3.1:8b"
+      - "nomic-embed-text"
+      - "codellama:7b"
+    # Model download job configuration
+    initJob:
+      enabled: true
+      image:
+        repository: "curlimages/curl"
+        tag: "latest"
+      resources:
+        requests:
+          memory: "256Mi"
+          cpu: "100m"
+        limits:
+          memory: "512Mi"
+          cpu: "500m"
+
+# Qdrant Vector Database Configuration
+qdrant:
+  enabled: true
+  name: "qdrant"
+  
+  image:
+    repository: "qdrant/qdrant"
+    tag: "latest"
+    pullPolicy: IfNotPresent
+    
+  # StatefulSet for persistent storage
+  replicaCount: 1
+  
+  service:
+    type: ClusterIP
+    ports:
+      http: 6333
+      grpc: 6334
+      
+  # Environment variables
+  env:
+    - name: QDRANT__SERVICE__HTTP_PORT
+      value: "6333"
+    - name: QDRANT__SERVICE__GRPC_PORT
+      value: "6334"
+    - name: QDRANT__LOG_LEVEL
+      value: "INFO"
+    - name: QDRANT__STORAGE__STORAGE_PATH
+      value: "/qdrant/storage"
+      
+  # Persistent storage for vector data
+  persistence:
+    enabled: true
+    storageClass: "gp3"
+    size: "50Gi"
+    accessMode: ReadWriteOnce
+    mountPath: "/qdrant/storage"
+    
+  # Resource requirements
+  resources:
+    requests:
+      memory: "1Gi"
+      cpu: "500m"
+    limits:
+      memory: "4Gi"
+      cpu: "2000m"
+      
+  # Health checks
+  livenessProbe:
+    httpGet:
+      path: /health
+      port: 6333
+    initialDelaySeconds: 30
+    periodSeconds: 30
+    timeoutSeconds: 10
+    
+  readinessProbe:
+    httpGet:
+      path: /readyz
+      port: 6333
+    initialDelaySeconds: 15
+    periodSeconds: 10
+    timeoutSeconds: 5
+    
+  # Node selector
+  nodeSelector: {}
+  
+  # Tolerations
+  tolerations: []
+  
+  # Collection initialization
+  collections:
+    # Pre-create collections for document embeddings
+    init:
+      enabled: true
+      collections:
+        - name: "documents"
+          vector_size: 768
+          distance: "Cosine"
+        - name: "conversations"
+          vector_size: 768
+          distance: "Cosine"
+
+# AWS Integration Configuration
+aws:
+  # S3 configuration for document storage
+  s3:
+    enabled: true
+    buckets:
+      documents: ""  # Set by customer values
+      data: ""       # Set by customer values
+    region: "us-west-2"
+    
+  # RDS configuration (connection info)
+  rds:
+    enabled: true
+    endpoints:
+      litellm: ""    # Set by customer values
+      lago: ""       # Set by customer values
+    port: 5432
+    
+  # ElastiCache configuration
+  elasticache:
+    enabled: true
+    endpoints:
+      litellm: ""    # Set by customer values
+      lago: ""       # Set by customer values
+    port: 6379
+    
+  # IAM roles for service accounts
+  serviceAccount:
+    create: true
+    annotations:
+      eks.amazonaws.com/role-arn: ""  # Set by customer values
+    name: "customer-stack-sa"
+
+# Secrets configuration
+secrets:
+  # Open WebUI secrets
+  openWebUI:
+    secretKey: ""  # Generated randomly
+    
+  # AWS credentials (if not using IAM roles)
+  aws:
+    accessKeyId: ""
+    secretAccessKey: ""
+    
+  # Database credentials
+  database:
+    litellmPassword: ""
+    lagoPassword: ""
+    
+  # Redis auth tokens
+  redis:
+    litellmToken: ""
+    lagoToken: ""
+
+# ConfigMaps
+configMaps:
+  # Application configuration
+  appConfig:
+    enabled: true
+    data:
+      customer_name: ""
+      environment: ""
+      region: ""
+      
+  # Model configuration for Ollama
+  modelConfig:
+    enabled: true
+    data:
+      models.json: |
+        {
+          "models": [
+            {
+              "name": "llama3.1:8b",
+              "description": "Llama 3.1 8B parameter model",
+              "size": "4.7GB",
+              "family": "llama"
+            },
+            {
+              "name": "nomic-embed-text",
+              "description": "Nomic embedding model for text",
+              "size": "274MB",
+              "family": "nomic-embed"
+            }
+          ]
+        }
+
+# Network Policies (if supported)
+networkPolicy:
+  enabled: false
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: customer-stack
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 11434
+        - protocol: TCP
+          port: 6333
+
+# Pod Disruption Budgets
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Horizontal Pod Autoscaler
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 80
+
+# Monitoring and observability
+monitoring:
+  enabled: true
+  serviceMonitor:
+    enabled: false
+    namespace: monitoring
+    interval: 30s
+    
+  # Prometheus annotations
+  prometheus:
+    scrape: true
+    port: "metrics"
+    path: "/metrics"

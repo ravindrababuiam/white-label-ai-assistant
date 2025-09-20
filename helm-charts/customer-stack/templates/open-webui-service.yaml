@@ -1,0 +1,22 @@
+{{- if .Values.openWebUI.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: open-webui-service
+  namespace: {{ .Values.global.customerName }}-stack
+  labels:
+    {{- include "open-webui.labels" . | nindent 4 }}
+  {{- with .Values.openWebUI.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.openWebUI.service.type }}
+  ports:
+    - port: {{ .Values.openWebUI.service.port }}
+      targetPort: {{ .Values.openWebUI.service.targetPort }}
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "open-webui.selectorLabels" . | nindent 4 }}
+{{- end }}

@@ -1,0 +1,94 @@
+# Terraform
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+.terraform/
+.terraform.lock.hcl
+terraform.tfstate.lock.info
+**/.terraform/
+**/terraform-provider-*
+**/.terraform.lock.hcl
+**/terraform.tfstate*
+
+# AWS
+.aws/
+
+# Logs
+*.log
+logs/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Windows
+*.exe
+*.msi
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Node modules
+node_modules/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+
+# Temporary files
+*.tmp
+*.temp
+*~
+
+# Build artifacts
+dist/
+build/
+*.zip
+*.tar.gz
+
+# Secrets and credentials
+*.pem
+*.key
+secrets.yaml
+.env
+.env.local
+
+# Deployment artifacts
+DEPLOYMENT_*.md
+TEST_*.md
+HEALTH_*.md
+AWS_*.md
+WINDOWS_*.md
+TASK_*.md
+*_COMPLETE*.md
+*_SUCCESS*.md
+*_RESULTS*.md
+*_SUMMARY*.md
+
+# Test files
+test-*.sh
+check-*.sh
+simple-*.sh
+final-*.sh
+deploy-*.sh
+k8s-deployments.yaml
+kind.exe
+
+# Backup files
+*.backup
+*.bak

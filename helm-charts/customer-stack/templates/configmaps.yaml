@@ -1,0 +1,66 @@
+{{- if .Values.configMaps.appConfig.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: {{ .Values.global.customerName }}-stack
+  labels:
+    {{- include "customer-stack.labels" . | nindent 4 }}
+data:
+  customer_name: {{ .Values.global.customerName | quote }}
+  environment: {{ .Values.global.environment | quote }}
+  region: {{ .Values.global.region | quote }}
+  {{- range $key, $value := .Values.configMaps.appConfig.data }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
+{{- end }}
+
+---
+{{- if .Values.configMaps.modelConfig.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: model-config
+  namespace: {{ .Values.global.customerName }}-stack
+  labels:
+    {{- include "customer-stack.labels" . | nindent 4 }}
+data:
+  {{- range $key, $value := .Values.configMaps.modelConfig.data }}
+  {{ $key }}: |
+{{ $value | indent 4 }}
+  {{- end }}
+{{- end }}
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aws-config
+  namespace: {{ .Values.global.customerName }}-stack
+  labels:
+    {{- include "customer-stack.labels" . | nindent 4 }}
+data:
+  region: {{ .Values.global.aws.region | quote }}
+  {{- if .Values.aws.s3.enabled }}
+  s3-documents-bucket: {{ include "customer-stack.s3.documentsBucket" . | quote }}
+  s3-data-bucket: {{ include "customer-stack.s3.dataBucket" . | quote }}
+  s3-region: {{ .Values.aws.s3.region | quote }}
+  {{- end }}
+  {{- if .Values.aws.rds.enabled }}
+  rds-port: {{ .Values.aws.rds.port | quote }}
+  {{- if .Values.aws.rds.endpoints.litellm }}
+  rds-litellm-endpoint: {{ .Values.aws.rds.endpoints.litellm | quote }}
+  {{- end }}
+  {{- if .Values.aws.rds.endpoints.lago }}
+  rds-lago-endpoint: {{ .Values.aws.rds.endpoints.lago | quote }}
+  {{- end }}
+  {{- end }}
+  {{- if .Values.aws.elasticache.enabled }}
+  redis-port: {{ .Values.aws.elasticache.port | quote }}
+  {{- if .Values.aws.elasticache.endpoints.litellm }}
+  redis-litellm-endpoint: {{ .Values.aws.elasticache.endpoints.litellm | quote }}
+  {{- end }}
+  {{- if .Values.aws.elasticache.endpoints.lago }}
+  redis-lago-endpoint: {{ .Values.aws.elasticache.endpoints.lago | quote }}
+  {{- end }}
+  {{- end }}

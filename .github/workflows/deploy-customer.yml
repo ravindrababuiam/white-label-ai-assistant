@@ -1,0 +1,465 @@
+name: Deploy Customer Environment
+
+on:
+  workflow_dispatch:
+    inputs:
+      customer_name:
+        description: 'Customer name (lowercase, alphanumeric, hyphens only)'
+        required: true
+        type: string
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+      aws_region:
+        description: 'AWS region'
+        required: true
+        default: 'us-west-2'
+        type: choice
+        options:
+          - us-east-1
+          - us-west-2
+          - eu-west-1
+          - ap-southeast-1
+      enable_gpu:
+        description: 'Enable GPU nodes for Ollama'
+        required: false
+        default: false
+        type: boolean
+      create_subaccount:
+        description: 'Create AWS subaccount'
+        required: false
+        default: false
+        type: boolean
+      customer_email:
+        description: 'Customer email (required if creating subaccount)'
+        required: false
+        type: string
+      dry_run:
+        description: 'Perform dry run validation only'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  AWS_REGION: ${{ inputs.aws_region }}
+  CUSTOMER_NAME: ${{ inputs.customer_name }}
+  ENVIRONMENT: ${{ inputs.environment }}
+  TERRAFORM_VERSION: '1.5.0'
+  HELM_VERSION: '3.12.0'
+
+jobs:
+  validate-inputs:
+    name: Validate Inputs
+    runs-on: ubuntu-latest
+    outputs:
+      customer_name: ${{ steps.validate.outputs.customer_name }}
+      environment: ${{ steps.validate.outputs.environment }}
+      aws_region: ${{ steps.validate.outputs.aws_region }}
+      enable_gpu: ${{ steps.validate.outputs.enable_gpu }}
+      create_subaccount: ${{ steps.validate.outputs.create_subaccount }}
+      customer_email: ${{ steps.validate.outputs.customer_email }}
+      dry_run: ${{ steps.validate.outputs.dry_run }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate inputs
+        id: validate
+        run: |
+          # Validate customer name format
+          if [[ ! "${{ inputs.customer_name }}" =~ ^[a-z0-9-]+$ ]]; then
+            echo "❌ Customer name must contain only lowercase letters, numbers, and hyphens"
+            exit 1
+          fi
+          
+          # Validate customer email if creating subaccount
+          if [[ "${{ inputs.create_subaccount }}" == "true" && -z "${{ inputs.customer_email }}" ]]; then
+            echo "❌ Customer email is required when creating subaccount"
+            exit 1
+          fi
+          
+          # Set outputs
+          echo "customer_name=${{ inputs.customer_name }}" >> $GITHUB_OUTPUT
+          echo "environment=${{ inputs.environment }}" >> $GITHUB_OUTPUT
+          echo "aws_region=${{ inputs.aws_region }}" >> $GITHUB_OUTPUT
+          echo "enable_gpu=${{ inputs.enable_gpu }}" >> $GITHUB_OUTPUT
+          echo "create_subaccount=${{ inputs.create_subaccount }}" >> $GITHUB_OUTPUT
+          echo "customer_email=${{ inputs.customer_email }}" >> $GITHUB_OUTPUT
+          echo "dry_run=${{ inputs.dry_run }}" >> $GITHUB_OUTPUT
+          
+          echo "✅ Input validation passed"
+
+  aws-subaccount-setup:
+    name: AWS Subaccount Setup
+    runs-on: ubuntu-latest
+    needs: validate-inputs
+    if: ${{ inputs.create_subaccount == true && inputs.dry_run == false }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Setup PowerShell
+        uses: azure/powershell@v1
+        with:
+          inlineScript: |
+            # Install AWS CLI if not present
+            if (!(Get-Command aws -ErrorAction SilentlyContinue)) {
+              Write-Host "Installing AWS CLI..."
+              Invoke-WebRequest -Uri "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -OutFile "awscliv2.zip"
+              Expand-Archive awscliv2.zip
+              sudo ./aws/install
+            }
+          azPSVersion: "latest"
+
+      - name: Create AWS subaccount
+        run: |
+          echo "🏢 Creating AWS subaccount for customer: ${{ inputs.customer_name }}"
+          
+          # Run subaccount setup script
+          pwsh -File scripts/aws-subaccount-setup.ps1 \
+            -CustomerName "${{ inputs.customer_name }}" \
+            -CustomerEmail "${{ inputs.customer_email }}"
+
+      - name: Upload subaccount artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: subaccount-setup-${{ inputs.customer_name }}
+          path: |
+            customers/${{ inputs.customer_name }}.conf
+            customers/${{ inputs.customer_name }}-setup-instructions.md
+            scripts/setup-account-${{ inputs.customer_name }}.sh
+
+  infrastructure-deployment:
+    name: Infrastructure Deployment
+    runs-on: ubuntu-latest
+    needs: [validate-inputs, aws-subaccount-setup]
+    if: always() && (needs.validate-inputs.result == 'success' && (needs.aws-subaccount-setup.result == 'success' || needs.aws-subaccount-setup.result == 'skipped'))
+    outputs:
+      terraform_outputs: ${{ steps.terraform-apply.outputs.terraform_outputs }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Download subaccount artifacts
+        if: ${{ inputs.create_subaccount == true }}
+        uses: actions/download-artifact@v4
+        with:
+          name: subaccount-setup-${{ inputs.customer_name }}
+
+      - name: Parameter validation and injection
+        run: |
+          echo "⚙️ Validating and injecting parameters..."
+          
+          # Create parameters hashtable
+          $parameters = @{
+            'customer_name' = '${{ inputs.customer_name }}'
+            'aws_region' = '${{ inputs.aws_region }}'
+            'environment' = '${{ inputs.environment }}'
+            'enable_gpu_nodes' = [bool]::Parse('${{ inputs.enable_gpu }}')
+          }
+          
+          # Run parameter injection
+          pwsh -File scripts/parameter-injection.ps1 \
+            -CustomerName "${{ inputs.customer_name }}" \
+            -Parameters $parameters \
+            $(if (Test-Path "customers/${{ inputs.customer_name }}.conf") { "-ConfigFile customers/${{ inputs.customer_name }}.conf" } else { "" })
+        shell: pwsh
+
+      - name: Customer onboarding
+        run: |
+          echo "🏗️ Setting up customer infrastructure..."
+          
+          pwsh -File scripts/customer-onboarding.ps1 \
+            -CustomerName "${{ inputs.customer_name }}" \
+            -AwsRegion "${{ inputs.aws_region }}" \
+            -Environment "${{ inputs.environment }}" \
+            $(if ('${{ inputs.enable_gpu }}' -eq 'true') { '-EnableGpu' } else { '' }) \
+            $(if ('${{ inputs.dry_run }}' -eq 'true') { '-DryRun' } else { '' })
+        shell: pwsh
+
+      - name: Terraform initialization
+        working-directory: terraform/environments/${{ inputs.customer_name }}
+        run: |
+          echo "📋 Initializing Terraform..."
+          terraform init
+
+      - name: Terraform validation
+        working-directory: terraform/environments/${{ inputs.customer_name }}
+        run: |
+          echo "✅ Validating Terraform configuration..."
+          terraform validate
+
+      - name: Terraform plan
+        working-directory: terraform/environments/${{ inputs.customer_name }}
+        run: |
+          echo "📊 Planning Terraform deployment..."
+          terraform plan -out=tfplan -detailed-exitcode
+        continue-on-error: true
+
+      - name: Terraform apply
+        id: terraform-apply
+        if: ${{ inputs.dry_run == false }}
+        working-directory: terraform/environments/${{ inputs.customer_name }}
+        run: |
+          echo "🚀 Applying Terraform configuration..."
+          terraform apply tfplan
+          
+          # Capture outputs
+          terraform output -json > terraform-outputs.json
+          echo "terraform_outputs=$(cat terraform-outputs.json | jq -c .)" >> $GITHUB_OUTPUT
+
+      - name: Upload Terraform artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-${{ inputs.customer_name }}
+          path: |
+            terraform/environments/${{ inputs.customer_name }}/terraform.tfstate
+            terraform/environments/${{ inputs.customer_name }}/terraform-outputs.json
+            terraform/environments/${{ inputs.customer_name }}/parameter-summary.md
+
+  application-deployment:
+    name: Application Deployment
+    runs-on: ubuntu-latest
+    needs: [validate-inputs, infrastructure-deployment]
+    if: always() && needs.infrastructure-deployment.result == 'success' && inputs.dry_run == false
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Download Terraform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-${{ inputs.customer_name }}
+          path: terraform/environments/${{ inputs.customer_name }}/
+
+      - name: Configure kubectl
+        run: |
+          echo "⚙️ Configuring kubectl..."
+          aws eks update-kubeconfig --region ${{ inputs.aws_region }} --name ${{ inputs.customer_name }}-eks-cluster
+
+      - name: Wait for EKS nodes
+        run: |
+          echo "⏳ Waiting for EKS nodes to be ready..."
+          kubectl wait --for=condition=Ready nodes --all --timeout=300s
+
+      - name: Deploy applications with Helm
+        run: |
+          echo "📦 Deploying customer applications..."
+          
+          pwsh -File helm-charts/deploy-helm-chart.ps1 \
+            -CustomerName "${{ inputs.customer_name }}" \
+            -Environment "${{ inputs.environment }}" \
+            -AwsRegion "${{ inputs.aws_region }}" \
+            $(if ('${{ inputs.enable_gpu }}' -eq 'true') { '-EnableGpu' } else { '' })
+        shell: pwsh
+
+      - name: Validate deployment
+        run: |
+          echo "🔍 Validating application deployment..."
+          
+          # Wait for pods to be ready
+          kubectl wait --for=condition=Ready pods --all -n ${{ inputs.customer_name }}-stack --timeout=600s
+          
+          # Check pod status
+          kubectl get pods -n ${{ inputs.customer_name }}-stack
+          
+          # Check services
+          kubectl get services -n ${{ inputs.customer_name }}-stack
+          
+          # Get LoadBalancer URL
+          LOADBALANCER_URL=$(kubectl get service open-webui-service -n ${{ inputs.customer_name }}-stack -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "pending")
+          echo "🌐 Application URL: http://$LOADBALANCER_URL:8080"
+
+      - name: Upload deployment artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-${{ inputs.customer_name }}
+          path: |
+            customers/${{ inputs.customer_name }}-helm-deployment.md
+
+  deployment-validation:
+    name: Deployment Validation
+    runs-on: ubuntu-latest
+    needs: [validate-inputs, application-deployment]
+    if: always() && needs.application-deployment.result == 'success'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig --region ${{ inputs.aws_region }} --name ${{ inputs.customer_name }}-eks-cluster
+
+      - name: Run comprehensive validation
+        run: |
+          echo "🔍 Running comprehensive deployment validation..."
+          
+          # Check EKS cluster
+          CLUSTER_STATUS=$(aws eks describe-cluster --region ${{ inputs.aws_region }} --name ${{ inputs.customer_name }}-eks-cluster --query 'cluster.status' --output text)
+          echo "EKS Cluster Status: $CLUSTER_STATUS"
+          
+          # Check RDS instances
+          RDS_COUNT=$(aws rds describe-db-instances --region ${{ inputs.aws_region }} --query "length(DBInstances[?contains(DBInstanceIdentifier, '${{ inputs.customer_name }}')])")
+          echo "RDS Instances: $RDS_COUNT"
+          
+          # Check ElastiCache
+          REDIS_COUNT=$(aws elasticache describe-replication-groups --region ${{ inputs.aws_region }} --query "length(ReplicationGroups[?contains(ReplicationGroupId, '${{ inputs.customer_name }}')])")
+          echo "Redis Clusters: $REDIS_COUNT"
+          
+          # Check S3 buckets
+          S3_COUNT=$(aws s3 ls | grep ${{ inputs.customer_name }} | wc -l)
+          echo "S3 Buckets: $S3_COUNT"
+          
+          # Check Kubernetes resources
+          echo "Kubernetes Pods:"
+          kubectl get pods -n ${{ inputs.customer_name }}-stack
+          
+          echo "Kubernetes Services:"
+          kubectl get services -n ${{ inputs.customer_name }}-stack
+          
+          # Test application health
+          echo "Testing application health..."
+          LOADBALANCER_URL=$(kubectl get service open-webui-service -n ${{ inputs.customer_name }}-stack -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
+          
+          if [ ! -z "$LOADBALANCER_URL" ]; then
+            echo "Testing application at: http://$LOADBALANCER_URL:8080"
+            # Wait for LoadBalancer to be ready
+            sleep 60
+            curl -f "http://$LOADBALANCER_URL:8080/health" || echo "Application health check failed (may still be starting)"
+          else
+            echo "LoadBalancer URL not yet available"
+          fi
+
+      - name: Generate validation report
+        run: |
+          echo "📊 Generating validation report..."
+          
+          cat > validation-report.md << EOF
+          # Deployment Validation Report
+          
+          ## Customer Information
+          - **Customer**: ${{ inputs.customer_name }}
+          - **Environment**: ${{ inputs.environment }}
+          - **Region**: ${{ inputs.aws_region }}
+          - **GPU Enabled**: ${{ inputs.enable_gpu }}
+          - **Deployment Date**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          
+          ## Infrastructure Status
+          - **EKS Cluster**: $(aws eks describe-cluster --region ${{ inputs.aws_region }} --name ${{ inputs.customer_name }}-eks-cluster --query 'cluster.status' --output text)
+          - **RDS Instances**: $(aws rds describe-db-instances --region ${{ inputs.aws_region }} --query "length(DBInstances[?contains(DBInstanceIdentifier, '${{ inputs.customer_name }}')])")
+          - **Redis Clusters**: $(aws elasticache describe-replication-groups --region ${{ inputs.aws_region }} --query "length(ReplicationGroups[?contains(ReplicationGroupId, '${{ inputs.customer_name }}')])")
+          - **S3 Buckets**: $(aws s3 ls | grep ${{ inputs.customer_name }} | wc -l)
+          
+          ## Application Status
+          \`\`\`
+          $(kubectl get pods -n ${{ inputs.customer_name }}-stack)
+          \`\`\`
+          
+          ## Access Information
+          - **Application URL**: http://$(kubectl get service open-webui-service -n ${{ inputs.customer_name }}-stack -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "pending"):8080
+          - **Namespace**: ${{ inputs.customer_name }}-stack
+          
+          ## Validation Status
+          ✅ Deployment completed successfully
+          EOF
+
+      - name: Upload validation report
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-report-${{ inputs.customer_name }}
+          path: validation-report.md
+
+  notification:
+    name: Send Notification
+    runs-on: ubuntu-latest
+    needs: [validate-inputs, deployment-validation]
+    if: always()
+    steps:
+      - name: Determine deployment status
+        id: status
+        run: |
+          if [[ "${{ needs.deployment-validation.result }}" == "success" ]]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "message=✅ Customer deployment completed successfully" >> $GITHUB_OUTPUT
+          elif [[ "${{ inputs.dry_run }}" == "true" ]]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "message=🔍 Dry run validation completed successfully" >> $GITHUB_OUTPUT
+          else
+            echo "status=failure" >> $GITHUB_OUTPUT
+            echo "message=❌ Customer deployment failed" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create deployment summary
+        run: |
+          cat > deployment-summary.md << EOF
+          # Deployment Summary
+          
+          **Customer**: ${{ inputs.customer_name }}  
+          **Environment**: ${{ inputs.environment }}  
+          **Region**: ${{ inputs.aws_region }}  
+          **Status**: ${{ steps.status.outputs.status }}  
+          **Message**: ${{ steps.status.outputs.message }}  
+          
+          **Workflow Run**: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
+
+      - name: Upload deployment summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-summary-${{ inputs.customer_name }}
+          path: deployment-summary.md

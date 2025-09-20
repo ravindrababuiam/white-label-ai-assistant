@@ -1,0 +1,80 @@
+{
+  "server": {
+    "id": "agency-mcp-server",
+    "name": "Agency MCP Server",
+    "description": "Main agency MCP server for task execution and external tool connectivity",
+    "endpoint": "${AGENCY_MCP_ENDPOINT}",
+    "protocol": "sse",
+    "enabled": true,
+    "autoConnect": true,
+    "timeout": 30000,
+    "retryPolicy": {
+      "enabled": true,
+      "maxRetries": 3,
+      "backoffMultiplier": 2,
+      "initialDelay": 1000
+    },
+    "healthCheck": {
+      "enabled": true,
+      "interval": 30000,
+      "timeout": 5000,
+      "retries": 3
+    },
+    "tags": ["agency", "production", "task-execution"]
+  },
+  "authentication": {
+    "type": "bearer",
+    "token": "${AGENCY_MCP_TOKEN}",
+    "refreshToken": "${AGENCY_MCP_REFRESH_TOKEN}",
+    "tokenEndpoint": "${AGENCY_MCP_TOKEN_ENDPOINT}",
+    "clientId": "${AGENCY_MCP_CLIENT_ID}",
+    "clientSecret": "${AGENCY_MCP_CLIENT_SECRET}"
+  },
+  "capabilities": {
+    "expectedTools": [
+      "file_operations",
+      "web_search",
+      "code_execution",
+      "database_query",
+      "api_request",
+      "email_send",
+      "calendar_management",
+      "document_generation"
+    ],
+    "expectedResources": [
+      "project_files",
+      "documentation",
+      "templates",
+      "configurations"
+    ],
+    "expectedPrompts": [
+      "code_review",
+      "documentation_generation",
+      "test_creation",
+      "deployment_checklist"
+    ]
+  },
+  "security": {
+    "allowedOrigins": [
+      "https://*.agency.com",
+      "https://localhost:*"
+    ],
+    "requiredScopes": [
+      "mcp:tools:execute",
+      "mcp:resources:read",
+      "mcp:prompts:access"
+    ],
+    "rateLimiting": {
+      "enabled": true,
+      "requestsPerMinute": 100,
+      "burstLimit": 20
+    }
+  },
+  "monitoring": {
+    "metricsEndpoint": "${AGENCY_MCP_METRICS_ENDPOINT}",
+    "logsEndpoint": "${AGENCY_MCP_LOGS_ENDPOINT}",
+    "alertsEndpoint": "${AGENCY_MCP_ALERTS_ENDPOINT}",
+    "enableDetailedLogging": true,
+    "logLevel": "INFO"
+  }
+}

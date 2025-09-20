@@ -1,0 +1,174 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "MCP Server Configuration Schema",
+  "type": "object",
+  "properties": {
+    "servers": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/mcpServer"
+      }
+    }
+  },
+  "required": ["servers"],
+  "definitions": {
+    "mcpServer": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9-_]+$",
+          "description": "Unique identifier for the MCP server"
+        },
+        "name": {
+          "type": "string",
+          "description": "Human-readable name for the MCP server"
+        },
+        "description": {
+          "type": "string",
+          "description": "Description of the MCP server functionality"
+        },
+        "endpoint": {
+          "type": "string",
+          "format": "uri",
+          "description": "MCP server endpoint URL"
+        },
+        "protocol": {
+          "type": "string",
+          "enum": ["stdio", "sse", "websocket"],
+          "default": "stdio",
+          "description": "MCP protocol transport type"
+        },
+        "command": {
+          "type": "string",
+          "description": "Command to execute for stdio transport"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Arguments for the command"
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Environment variables for the MCP server"
+        },
+        "authentication": {
+          "$ref": "#/definitions/authentication"
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether the MCP server is enabled"
+        },
+        "healthCheck": {
+          "$ref": "#/definitions/healthCheck"
+        },
+        "timeout": {
+          "type": "integer",
+          "minimum": 1000,
+          "default": 30000,
+          "description": "Request timeout in milliseconds"
+        },
+        "retryPolicy": {
+          "$ref": "#/definitions/retryPolicy"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Tags for categorizing the MCP server"
+        }
+      },
+      "required": ["id", "name", "endpoint"],
+      "additionalProperties": false
+    },
+    "authentication": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["none", "bearer", "api-key", "basic"],
+          "default": "none"
+        },
+        "token": {
+          "type": "string",
+          "description": "Authentication token (for bearer or api-key)"
+        },
+        "username": {
+          "type": "string",
+          "description": "Username for basic authentication"
+        },
+        "password": {
+          "type": "string",
+          "description": "Password for basic authentication"
+        },
+        "header": {
+          "type": "string",
+          "description": "Custom header name for api-key authentication"
+        }
+      },
+      "required": ["type"],
+      "additionalProperties": false
+    },
+    "healthCheck": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "interval": {
+          "type": "integer",
+          "minimum": 5000,
+          "default": 30000,
+          "description": "Health check interval in milliseconds"
+        },
+        "timeout": {
+          "type": "integer",
+          "minimum": 1000,
+          "default": 5000,
+          "description": "Health check timeout in milliseconds"
+        },
+        "retries": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 3,
+          "description": "Number of retries before marking as unhealthy"
+        }
+      },
+      "additionalProperties": false
+    },
+    "retryPolicy": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "maxRetries": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 3
+        },
+        "backoffMultiplier": {
+          "type": "number",
+          "minimum": 1,
+          "default": 2
+        },
+        "initialDelay": {
+          "type": "integer",
+          "minimum": 100,
+          "default": 1000,
+          "description": "Initial delay in milliseconds"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,23 @@
+apiVersion: v2
+name: customer-stack
+description: White Label AI Assistant Customer Stack
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - ai
+  - assistant
+  - ollama
+  - open-webui
+  - qdrant
+  - vector-database
+home: https://github.com/your-org/white-label-ai-assistant
+sources:
+  - https://github.com/your-org/white-label-ai-assistant
+maintainers:
+  - name: Platform Team
+    email: platform@yourcompany.com
+dependencies: []
+annotations:
+  category: AI/ML
+  licenses: MIT
