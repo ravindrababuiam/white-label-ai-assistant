@@ -161,17 +161,28 @@ Common AWS environment variables
 Common security context
 */}}
 {{- define "customer-stack.securityContext" -}}
+{{- if and .Values.global .Values.global.securityContext }}
 runAsNonRoot: {{ .Values.global.securityContext.runAsNonRoot | default true }}
 runAsUser: {{ .Values.global.securityContext.runAsUser | default 1000 }}
 fsGroup: {{ .Values.global.securityContext.fsGroup | default 2000 }}
+{{- else }}
+runAsNonRoot: true
+runAsUser: 1000
+fsGroup: 2000
+{{- end }}
 {{- end }}
 
 {{/*
 Common pod security context
 */}}
 {{- define "customer-stack.podSecurityContext" -}}
+{{- if and .Values.global .Values.global.securityContext }}
 runAsNonRoot: {{ .Values.global.securityContext.runAsNonRoot | default true }}
 runAsUser: {{ .Values.global.securityContext.runAsUser | default 1000 }}
+{{- else }}
+runAsNonRoot: true
+runAsUser: 1000
+{{- end }}
 {{- end }}
 
 {{/*
