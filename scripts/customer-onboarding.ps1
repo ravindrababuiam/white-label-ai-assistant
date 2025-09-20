@@ -151,20 +151,40 @@ module "vpc" {
   tags = local.common_tags
 }
 
+# IAM Module
+module "iam" {
+  source = "../../modules/iam"
+  
+  customer_name = local.customer_name
+  
+  tags = local.common_tags
+}
+
+# Security Groups Module
+module "security_groups" {
+  source = "../../modules/security-groups"
+  
+  customer_name = local.customer_name
+  vpc_id        = module.vpc.vpc_id
+  
+  tags = local.common_tags
+}
+
 # EKS Module
 module "eks" {
   source = "../../modules/eks"
   
-  customer_name = local.customer_name
-  environment   = local.environment
+  customer_name                    = local.customer_name
+  private_subnet_ids              = module.vpc.private_subnet_ids
+  public_subnet_ids               = module.vpc.public_subnet_ids
+  control_plane_security_group_id = module.security_groups.eks_control_plane_security_group_id
+  worker_nodes_security_group_id  = module.security_groups.eks_worker_nodes_security_group_id
+  cluster_service_role_arn        = module.iam.eks_cluster_service_role_arn
+  node_group_role_arn            = module.iam.eks_node_group_role_arn
   
-  vpc_id              = module.vpc.vpc_id
-  private_subnet_ids  = module.vpc.private_subnet_ids
+  enable_gpu_nodes = var.enable_gpu
   
-  node_groups = var.node_groups
-  enable_gpu  = var.enable_gpu
-  
-  tags = local.common_tags
+  common_tags = local.common_tags
 }
 
 # S3 Module
@@ -172,7 +192,6 @@ module "s3" {
   source = "../../modules/s3"
   
   customer_name = local.customer_name
-  environment   = local.environment
   
   tags = local.common_tags
 }
@@ -181,11 +200,9 @@ module "s3" {
 module "rds" {
   source = "../../modules/rds"
   
-  customer_name = local.customer_name
-  environment   = local.environment
-  
-  vpc_id             = module.vpc.vpc_id
+  customer_name      = local.customer_name
   private_subnet_ids = module.vpc.private_subnet_ids
+  security_group_ids = [module.security_groups.rds_security_group_id]
   
   tags = local.common_tags
 }
