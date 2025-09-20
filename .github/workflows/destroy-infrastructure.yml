@@ -1,0 +1,347 @@
+name: 🗑️ Destroy Customer Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      customer_name:
+        description: 'Customer name to destroy'
+        required: true
+        type: string
+      environment:
+        description: 'Environment to destroy'
+        required: true
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+        default: development
+      aws_region:
+        description: 'AWS Region'
+        required: true
+        type: choice
+        options:
+          - us-west-2
+          - us-east-1
+          - eu-west-1
+        default: us-west-2
+      destroy_applications:
+        description: 'Destroy applications (Helm releases)'
+        required: true
+        type: boolean
+        default: true
+      destroy_infrastructure:
+        description: 'Destroy AWS infrastructure (Terraform)'
+        required: true
+        type: boolean
+        default: true
+      force_destroy:
+        description: 'Force destroy (skip confirmations)'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  TERRAFORM_VERSION: '1.5.0'
+  HELM_VERSION: 'v3.12.0'
+
+jobs:
+  validate-destruction-request:
+    name: Validate Destruction Request
+    runs-on: ubuntu-latest
+    outputs:
+      customer_name: ${{ steps.validate.outputs.customer_name }}
+      environment: ${{ steps.validate.outputs.environment }}
+      aws_region: ${{ steps.validate.outputs.aws_region }}
+      destroy_applications: ${{ steps.validate.outputs.destroy_applications }}
+      destroy_infrastructure: ${{ steps.validate.outputs.destroy_infrastructure }}
+      force_destroy: ${{ steps.validate.outputs.force_destroy }}
+    steps:
+      - name: Validate destruction request
+        id: validate
+        run: |
+          echo "🔍 Validating destruction request..."
+          
+          # Validate customer name
+          if [[ ! "${{ inputs.customer_name }}" =~ ^[a-z0-9-]+$ ]]; then
+            echo "❌ Invalid customer name. Use lowercase letters, numbers, and hyphens only."
+            exit 1
+          fi
+          
+          # Validate environment
+          if [[ "${{ inputs.environment }}" == "production" && "${{ inputs.force_destroy }}" != "true" ]]; then
+            echo "⚠️ Production environment destruction requires force_destroy=true"
+            exit 1
+          fi
+          
+          # Set outputs
+          echo "customer_name=${{ inputs.customer_name }}" >> $GITHUB_OUTPUT
+          echo "environment=${{ inputs.environment }}" >> $GITHUB_OUTPUT
+          echo "aws_region=${{ inputs.aws_region }}" >> $GITHUB_OUTPUT
+          echo "destroy_applications=${{ inputs.destroy_applications }}" >> $GITHUB_OUTPUT
+          echo "destroy_infrastructure=${{ inputs.destroy_infrastructure }}" >> $GITHUB_OUTPUT
+          echo "force_destroy=${{ inputs.force_destroy }}" >> $GITHUB_OUTPUT
+          
+          echo "✅ Destruction request validation passed"
+
+  destruction-approval:
+    name: Destruction Approval
+    runs-on: ubuntu-latest
+    needs: validate-destruction-request
+    if: inputs.environment == 'production' || inputs.force_destroy == false
+    environment: destruction-approval
+    steps:
+      - name: Production destruction approval
+        run: |
+          echo "🔒 CRITICAL: Infrastructure destruction requires manual approval"
+          echo "Customer: ${{ inputs.customer_name }}"
+          echo "Environment: ${{ inputs.environment }}"
+          echo "Region: ${{ inputs.aws_region }}"
+          echo "Destroy Applications: ${{ inputs.destroy_applications }}"
+          echo "Destroy Infrastructure: ${{ inputs.destroy_infrastructure }}"
+          echo ""
+          echo "⚠️  WARNING: This action is IRREVERSIBLE!"
+          echo "⚠️  All data will be permanently lost!"
+
+  destroy-applications:
+    name: Destroy Applications
+    runs-on: ubuntu-latest
+    needs: [validate-destruction-request, destruction-approval]
+    if: always() && inputs.destroy_applications == true && (needs.destruction-approval.result == 'success' || needs.destruction-approval.result == 'skipped')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Configure kubectl
+        run: |
+          echo "🔧 Configuring kubectl for EKS cluster..."
+          aws eks update-kubeconfig --region ${{ inputs.aws_region }} --name ${{ inputs.customer_name }}-eks-cluster || echo "⚠️ EKS cluster not found or already destroyed"
+
+      - name: Destroy Helm releases
+        run: |
+          echo "🗑️ Destroying Helm releases for customer: ${{ inputs.customer_name }}"
+          
+          # Check if namespace exists
+          if kubectl get namespace ${{ inputs.customer_name }}-stack 2>/dev/null; then
+            echo "📦 Found namespace: ${{ inputs.customer_name }}-stack"
+            
+            # List all Helm releases in the namespace
+            echo "📋 Listing Helm releases..."
+            helm list -n ${{ inputs.customer_name }}-stack
+            
+            # Uninstall Helm release
+            echo "🗑️ Uninstalling Helm release: ${{ inputs.customer_name }}"
+            helm uninstall ${{ inputs.customer_name }} -n ${{ inputs.customer_name }}-stack --ignore-not-found
+            
+            # Wait for pods to terminate
+            echo "⏳ Waiting for pods to terminate..."
+            kubectl wait --for=delete pods --all -n ${{ inputs.customer_name }}-stack --timeout=300s || echo "⚠️ Some pods may still be terminating"
+            
+            # Force delete any remaining resources
+            echo "🧹 Cleaning up remaining resources..."
+            kubectl delete all --all -n ${{ inputs.customer_name }}-stack --ignore-not-found
+            kubectl delete pvc --all -n ${{ inputs.customer_name }}-stack --ignore-not-found
+            kubectl delete secrets --all -n ${{ inputs.customer_name }}-stack --ignore-not-found
+            kubectl delete configmaps --all -n ${{ inputs.customer_name }}-stack --ignore-not-found
+            
+            # Delete namespace
+            echo "🗑️ Deleting namespace..."
+            kubectl delete namespace ${{ inputs.customer_name }}-stack --ignore-not-found
+            
+            echo "✅ Applications destroyed successfully"
+          else
+            echo "ℹ️ Namespace ${{ inputs.customer_name }}-stack not found - applications may already be destroyed"
+          fi
+
+  destroy-infrastructure:
+    name: Destroy AWS Infrastructure
+    runs-on: ubuntu-latest
+    needs: [validate-destruction-request, destruction-approval, destroy-applications]
+    if: always() && inputs.destroy_infrastructure == true && (needs.destruction-approval.result == 'success' || needs.destruction-approval.result == 'skipped')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Destroy Terraform infrastructure
+        run: |
+          echo "🗑️ Destroying Terraform infrastructure for customer: ${{ inputs.customer_name }}"
+          
+          # Check if Terraform directory exists
+          TERRAFORM_DIR="terraform/environments/${{ inputs.customer_name }}"
+          if [ -d "$TERRAFORM_DIR" ]; then
+            cd "$TERRAFORM_DIR"
+            
+            echo "📋 Current Terraform state:"
+            terraform init -backend-config="bucket=my-terra-bucket-001" \
+                          -backend-config="key=${{ inputs.customer_name }}/terraform.tfstate" \
+                          -backend-config="region=${{ inputs.aws_region }}"
+            
+            terraform plan -destroy -var="customer_name=${{ inputs.customer_name }}" \
+                                   -var="environment=${{ inputs.environment }}" \
+                                   -var="aws_region=${{ inputs.aws_region }}"
+            
+            echo "🗑️ Executing Terraform destroy..."
+            terraform destroy -auto-approve \
+                            -var="customer_name=${{ inputs.customer_name }}" \
+                            -var="environment=${{ inputs.environment }}" \
+                            -var="aws_region=${{ inputs.aws_region }}"
+            
+            echo "✅ Terraform infrastructure destroyed successfully"
+          else
+            echo "ℹ️ Terraform directory not found: $TERRAFORM_DIR"
+            echo "Infrastructure may already be destroyed or was not created via Terraform"
+          fi
+
+      - name: Clean up S3 buckets
+        run: |
+          echo "🧹 Cleaning up S3 buckets..."
+          
+          # List and delete S3 buckets for this customer
+          aws s3api list-buckets --query "Buckets[?contains(Name, '${{ inputs.customer_name }}')].Name" --output text | while read bucket; do
+            if [ ! -z "$bucket" ]; then
+              echo "🗑️ Deleting S3 bucket: $bucket"
+              
+              # Delete all objects in bucket
+              aws s3 rm s3://$bucket --recursive || echo "⚠️ Failed to delete objects in $bucket"
+              
+              # Delete all versions (if versioning enabled)
+              aws s3api delete-objects --bucket $bucket --delete "$(aws s3api list-object-versions --bucket $bucket --query '{Objects: Versions[].{Key: Key, VersionId: VersionId}}' --output json)" 2>/dev/null || echo "ℹ️ No versions to delete in $bucket"
+              
+              # Delete bucket
+              aws s3api delete-bucket --bucket $bucket --region ${{ inputs.aws_region }} || echo "⚠️ Failed to delete bucket $bucket"
+              
+              echo "✅ S3 bucket $bucket deleted"
+            fi
+          done
+
+      - name: Verify destruction
+        run: |
+          echo "🔍 Verifying infrastructure destruction..."
+          
+          # Check EKS cluster
+          if aws eks describe-cluster --name ${{ inputs.customer_name }}-eks-cluster --region ${{ inputs.aws_region }} 2>/dev/null; then
+            echo "⚠️ EKS cluster still exists"
+          else
+            echo "✅ EKS cluster destroyed"
+          fi
+          
+          # Check RDS instances
+          RDS_COUNT=$(aws rds describe-db-instances --region ${{ inputs.aws_region }} --query "length(DBInstances[?contains(DBInstanceIdentifier, '${{ inputs.customer_name }}')])" --output text)
+          if [ "$RDS_COUNT" -gt "0" ]; then
+            echo "⚠️ $RDS_COUNT RDS instances still exist"
+          else
+            echo "✅ All RDS instances destroyed"
+          fi
+          
+          # Check S3 buckets
+          S3_COUNT=$(aws s3api list-buckets --query "length(Buckets[?contains(Name, '${{ inputs.customer_name }}')])" --output text)
+          if [ "$S3_COUNT" -gt "0" ]; then
+            echo "⚠️ $S3_COUNT S3 buckets still exist"
+          else
+            echo "✅ All S3 buckets destroyed"
+          fi
+          
+          echo "🎯 Infrastructure destruction verification completed"
+
+  cleanup-terraform-state:
+    name: Cleanup Terraform State
+    runs-on: ubuntu-latest
+    needs: [validate-destruction-request, destroy-infrastructure]
+    if: always() && inputs.destroy_infrastructure == true && needs.destroy-infrastructure.result == 'success'
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Remove Terraform state files
+        run: |
+          echo "🧹 Cleaning up Terraform state files..."
+          
+          # Delete Terraform state file from S3
+          aws s3 rm s3://my-terra-bucket-001/${{ inputs.customer_name }}/terraform.tfstate || echo "ℹ️ Terraform state file not found"
+          aws s3 rm s3://my-terra-bucket-001/${{ inputs.customer_name }}/terraform.tfstate.backup || echo "ℹ️ Terraform state backup not found"
+          
+          # Delete DynamoDB lock table entry (if exists)
+          aws dynamodb delete-item --table-name terraform-locks --key '{"LockID":{"S":"my-terra-bucket-001/${{ inputs.customer_name }}/terraform.tfstate"}}' --region ${{ inputs.aws_region }} 2>/dev/null || echo "ℹ️ No DynamoDB lock entry found"
+          
+          echo "✅ Terraform state cleanup completed"
+
+  destruction-summary:
+    name: Destruction Summary
+    runs-on: ubuntu-latest
+    needs: [validate-destruction-request, destroy-applications, destroy-infrastructure, cleanup-terraform-state]
+    if: always()
+    steps:
+      - name: Generate destruction summary
+        run: |
+          echo "# 🗑️ Infrastructure Destruction Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Customer Information" >> $GITHUB_STEP_SUMMARY
+          echo "- **Customer**: ${{ inputs.customer_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment**: ${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Region**: ${{ inputs.aws_region }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Timestamp**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Destruction Results" >> $GITHUB_STEP_SUMMARY
+          
+          if [[ "${{ needs.destroy-applications.result }}" == "success" ]]; then
+            echo "- ✅ **Applications**: Successfully destroyed" >> $GITHUB_STEP_SUMMARY
+          elif [[ "${{ inputs.destroy_applications }}" == "true" ]]; then
+            echo "- ❌ **Applications**: Destruction failed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- ⏭️ **Applications**: Skipped" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [[ "${{ needs.destroy-infrastructure.result }}" == "success" ]]; then
+            echo "- ✅ **Infrastructure**: Successfully destroyed" >> $GITHUB_STEP_SUMMARY
+          elif [[ "${{ inputs.destroy_infrastructure }}" == "true" ]]; then
+            echo "- ❌ **Infrastructure**: Destruction failed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- ⏭️ **Infrastructure**: Skipped" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [[ "${{ needs.cleanup-terraform-state.result }}" == "success" ]]; then
+            echo "- ✅ **State Cleanup**: Successfully completed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- ⚠️ **State Cleanup**: May need manual intervention" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## ⚠️ Important Notes" >> $GITHUB_STEP_SUMMARY
+          echo "- All data has been permanently deleted" >> $GITHUB_STEP_SUMMARY
+          echo "- This action cannot be undone" >> $GITHUB_STEP_SUMMARY
+          echo "- Verify AWS console to ensure complete cleanup" >> $GITHUB_STEP_SUMMARY
+          
+          echo "🎯 Destruction process completed!"
