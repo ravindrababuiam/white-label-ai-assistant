@@ -18,6 +18,12 @@ global:
     
   # Image pull policy
   imagePullPolicy: IfNotPresent
+  
+  # Security context
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 2000
 
 # Namespace configuration
 namespace:
