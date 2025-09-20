@@ -142,13 +142,15 @@ module "vpc" {
   source = "../../modules/vpc"
   
   customer_name = local.customer_name
-  environment   = local.environment
   aws_region    = local.aws_region
   
   vpc_cidr = var.vpc_cidr
   availability_zones = slice(data.aws_availability_zones.available.names, 0, 3)
   
-  tags = local.common_tags
+  public_subnet_cidrs  = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
+  private_subnet_cidrs = ["10.0.11.0/24", "10.0.12.0/24", "10.0.13.0/24"]
+  
+  common_tags = local.common_tags
 }
 
 # IAM Module
