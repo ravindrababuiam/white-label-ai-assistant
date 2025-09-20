@@ -1,11 +1,14 @@
-# RDS PostgreSQL for LiteLLM and Lago
+# RDS PostgreSQL Module for LiteLLM and Lago
+
+# DB Subnet Group
 resource "aws_db_subnet_group" "main" {
   name       = "${var.customer_name}-db-subnet-group"
-  subnet_ids = module.vpc.private_subnet_ids
+  subnet_ids = var.private_subnet_ids
 
-  tags = local.common_tags
+  tags = var.tags
 }
 
+# DB Parameter Group
 resource "aws_db_parameter_group" "postgres15" {
   family = "postgres15"
   name   = "${var.customer_name}-postgres15-params"
@@ -25,7 +28,7 @@ resource "aws_db_parameter_group" "postgres15" {
     value = "1000"
   }
 
-  tags = local.common_tags
+  tags = var.tags
 }
 
 # Main PostgreSQL database for LiteLLM
@@ -34,12 +37,12 @@ resource "aws_db_instance" "litellm" {
 
   # Engine configuration
   engine         = "postgres"
-  engine_version = "15.7"
-  instance_class = "db.t3.micro"
+  engine_version = var.postgres_version
+  instance_class = var.db_instance_class
 
   # Storage configuration
-  allocated_storage     = 20
-  max_allocated_storage = 100
+  allocated_storage     = var.allocated_storage
+  max_allocated_storage = var.max_allocated_storage
   storage_type          = "gp3"
   storage_encrypted     = true
 
@@ -50,26 +53,26 @@ resource "aws_db_instance" "litellm" {
 
   # Network configuration
   db_subnet_group_name   = aws_db_subnet_group.main.name
-  vpc_security_group_ids = [module.security_groups.rds_security_group_id]
+  vpc_security_group_ids = var.security_group_ids
   publicly_accessible    = false
 
   # Backup configuration
-  backup_retention_period = 7
-  backup_window          = "03:00-04:00"
-  maintenance_window     = "sun:04:00-sun:05:00"
+  backup_retention_period = var.backup_retention_period
+  backup_window          = var.backup_window
+  maintenance_window     = var.maintenance_window
 
   # Parameter group
   parameter_group_name = aws_db_parameter_group.postgres15.name
 
   # Monitoring
-  monitoring_interval = 60
+  monitoring_interval = var.monitoring_interval
   monitoring_role_arn = aws_iam_role.rds_monitoring.arn
 
   # Deletion protection
-  deletion_protection = false
-  skip_final_snapshot = true
+  deletion_protection = var.deletion_protection
+  skip_final_snapshot = var.skip_final_snapshot
 
-  tags = merge(local.common_tags, {
+  tags = merge(var.tags, {
     Name = "${var.customer_name}-litellm-database"
   })
 }
@@ -80,12 +83,12 @@ resource "aws_db_instance" "lago" {
 
   # Engine configuration
   engine         = "postgres"
-  engine_version = "15.7"
-  instance_class = "db.t3.micro"
+  engine_version = var.postgres_version
+  instance_class = var.db_instance_class
 
   # Storage configuration
-  allocated_storage     = 20
-  max_allocated_storage = 100
+  allocated_storage     = var.allocated_storage
+  max_allocated_storage = var.max_allocated_storage
   storage_type          = "gp3"
   storage_encrypted     = true
 
@@ -96,26 +99,26 @@ resource "aws_db_instance" "lago" {
 
   # Network configuration
   db_subnet_group_name   = aws_db_subnet_group.main.name
-  vpc_security_group_ids = [module.security_groups.rds_security_group_id]
+  vpc_security_group_ids = var.security_group_ids
   publicly_accessible    = false
 
   # Backup configuration
-  backup_retention_period = 7
-  backup_window          = "03:00-04:00"
-  maintenance_window     = "sun:04:00-sun:05:00"
+  backup_retention_period = var.backup_retention_period
+  backup_window          = var.backup_window
+  maintenance_window     = var.maintenance_window
 
   # Parameter group
   parameter_group_name = aws_db_parameter_group.postgres15.name
 
   # Monitoring
-  monitoring_interval = 60
+  monitoring_interval = var.monitoring_interval
   monitoring_role_arn = aws_iam_role.rds_monitoring.arn
 
   # Deletion protection
-  deletion_protection = false
-  skip_final_snapshot = true
+  deletion_protection = var.deletion_protection
+  skip_final_snapshot = var.skip_final_snapshot
 
-  tags = merge(local.common_tags, {
+  tags = merge(var.tags, {
     Name = "${var.customer_name}-lago-database"
   })
 }
@@ -150,7 +153,7 @@ resource "aws_iam_role" "rds_monitoring" {
     ]
   })
 
-  tags = local.common_tags
+  tags = var.tags
 }
 
 resource "aws_iam_role_policy_attachment" "rds_monitoring" {

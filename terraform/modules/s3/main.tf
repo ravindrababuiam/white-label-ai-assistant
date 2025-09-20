@@ -1,8 +1,15 @@
+# S3 Module for Customer Document Storage and LiteLLM Data
+
+# Random suffix for bucket names to ensure uniqueness
+resource "random_id" "bucket_suffix" {
+  byte_length = 4
+}
+
 # S3 bucket for customer document storage
 resource "aws_s3_bucket" "customer_documents" {
   bucket = "${var.customer_name}-documents-${random_id.bucket_suffix.hex}"
 
-  tags = merge(local.common_tags, {
+  tags = merge(var.tags, {
     Name = "${var.customer_name}-documents-bucket"
   })
 }
@@ -10,7 +17,7 @@ resource "aws_s3_bucket" "customer_documents" {
 resource "aws_s3_bucket_versioning" "customer_documents" {
   bucket = aws_s3_bucket.customer_documents.id
   versioning_configuration {
-    status = "Enabled"
+    status = var.enable_versioning ? "Enabled" : "Disabled"
   }
 }
 
@@ -19,7 +26,7 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "customer_document
 
   rule {
     apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
+      sse_algorithm = var.encryption_algorithm
     }
   }
 }
@@ -34,6 +41,7 @@ resource "aws_s3_bucket_public_access_block" "customer_documents" {
 }
 
 resource "aws_s3_bucket_lifecycle_configuration" "customer_documents" {
+  count  = var.enable_lifecycle ? 1 : 0
   bucket = aws_s3_bucket.customer_documents.id
 
   rule {
@@ -45,21 +53,21 @@ resource "aws_s3_bucket_lifecycle_configuration" "customer_documents" {
     }
 
     transition {
-      days          = 30
+      days          = var.transition_to_ia_days
       storage_class = "STANDARD_IA"
     }
 
     transition {
-      days          = 90
+      days          = var.transition_to_glacier_days
       storage_class = "GLACIER"
     }
 
     expiration {
-      days = 365
+      days = var.expiration_days
     }
 
     noncurrent_version_expiration {
-      noncurrent_days = 30
+      noncurrent_days = var.noncurrent_version_expiration_days
     }
   }
 }
@@ -68,7 +76,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "customer_documents" {
 resource "aws_s3_bucket" "litellm_data" {
   bucket = "${var.customer_name}-litellm-data-${random_id.bucket_suffix.hex}"
 
-  tags = merge(local.common_tags, {
+  tags = merge(var.tags, {
     Name = "${var.customer_name}-litellm-data-bucket"
   })
 }
@@ -76,7 +84,7 @@ resource "aws_s3_bucket" "litellm_data" {
 resource "aws_s3_bucket_versioning" "litellm_data" {
   bucket = aws_s3_bucket.litellm_data.id
   versioning_configuration {
-    status = "Enabled"
+    status = var.enable_versioning ? "Enabled" : "Disabled"
   }
 }
 
@@ -85,7 +93,7 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "litellm_data" {
 
   rule {
     apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
+      sse_algorithm = var.encryption_algorithm
     }
   }
 }
@@ -99,7 +107,31 @@ resource "aws_s3_bucket_public_access_block" "litellm_data" {
   restrict_public_buckets = true
 }
 
-# Random suffix for bucket names
-resource "random_id" "bucket_suffix" {
-  byte_length = 4
+# IAM policy for S3 access
+resource "aws_iam_policy" "s3_access" {
+  name        = "${var.customer_name}-s3-access-policy"
+  description = "Policy for accessing customer S3 buckets"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:ListBucket"
+        ]
+        Resource = [
+          aws_s3_bucket.customer_documents.arn,
+          "${aws_s3_bucket.customer_documents.arn}/*",
+          aws_s3_bucket.litellm_data.arn,
+          "${aws_s3_bucket.litellm_data.arn}/*"
+        ]
+      }
+    ]
+  })
+
+  tags = var.tags
 }
