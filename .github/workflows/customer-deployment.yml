@@ -162,6 +162,7 @@ jobs:
           
           pwsh -File scripts/customer-onboarding.ps1 \
             -CustomerName "${{ inputs.customer_name }}" \
+            -CustomerEmail "admin@${{ inputs.customer_name }}.com" \
             -AwsRegion "${{ inputs.aws_region }}" \
             -Environment "${{ inputs.environment }}" \
             -EnableGpu:$${{ inputs.enable_gpu }}
